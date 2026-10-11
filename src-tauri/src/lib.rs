@@ -614,6 +614,12 @@ pub fn run() {
         // windows is focused. `Always` removes that registration (RIDEV_REMOVE),
         // keeping the hook alive when Trace itself has focus. See wry#1761.
         .device_event_filter(tauri::DeviceEventFilter::Always)
+        // Registered first so a second launch (e.g. from the Start menu) focuses
+        // the running instance and exits, instead of spawning a duplicate process
+        // and a second tray icon. The callback runs on the first instance.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            tray::show_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
