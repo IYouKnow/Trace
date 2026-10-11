@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AppShell } from "./components/AppShell";
 import { Sidebar } from "./components/Sidebar";
+import { Toaster } from "./components/ui/Toaster";
 import { UpdateBar } from "./components/UpdateBar";
 import { api, type Status } from "./lib/api";
 import type { View } from "./lib/nav";
@@ -84,6 +85,7 @@ export default function App() {
         />
       )}
       {view === "hotkeys" && <Hotkeys />}
+      <Toaster />
     </AppShell>
   );
 }

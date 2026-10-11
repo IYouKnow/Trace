@@ -75,6 +75,7 @@ export const api = {
   deleteClip: (path: string) => invoke<void>("delete_clip", { path }),
   openClip: (path: string) => invoke<void>("open_clip", { path }),
   revealClip: (path: string) => invoke<void>("reveal_clip", { path }),
+  repairClips: () => invoke<number>("repair_clips"),
 
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),

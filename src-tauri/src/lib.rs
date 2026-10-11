@@ -24,6 +24,9 @@ mod tray;
 /// Folder name under the user's Videos directory.
 const CLIPS_FOLDER: &str = "Trace";
 
+/// Guards against overlapping clip-repair passes.
+static REPAIRING: AtomicBool = AtomicBool::new(false);
+
 /// AAC bitrate used for each captured audio track.
 const AUDIO_BITRATE: u64 = 192_000;
 
@@ -606,6 +609,39 @@ fn reveal_clip(app: AppHandle, path: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Rewrites any clips left with a wrong container duration by the old absolute
+/// timestamp bug. Runs off-thread; returns how many clips were repaired.
+#[tauri::command]
+async fn repair_clips(app: AppHandle) -> Result<usize, String> {
+    let dir = clips_dir(&app)?;
+    // React StrictMode double-fires mount effects in dev; ignore an overlapping
+    // pass rather than scanning twice.
+    if REPAIRING.swap(true, Ordering::SeqCst) {
+        return Ok(0);
+    }
+
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        let clips = library::scan(&dir).map_err(|error| error.to_string())?;
+        let mut repaired = 0;
+        for clip in clips {
+            match trace_engine::repair::repair_file(Path::new(&clip.path)) {
+                Ok(true) => repaired += 1,
+                Ok(false) => {}
+                Err(error) => eprintln!("failed to repair {}: {error}", clip.path),
+            }
+        }
+        Ok(repaired)
+    })
+    .await;
+    REPAIRING.store(false, Ordering::SeqCst);
+
+    let repaired = result.map_err(|error| error.to_string())??;
+    if repaired > 0 {
+        let _ = app.emit("clips-changed", ());
+    }
+    Ok(repaired)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -727,6 +763,7 @@ pub fn run() {
             delete_clip,
             open_clip,
             reveal_clip,
+            repair_clips,
             get_hotkeys,
             set_hotkeys,
             set_hotkeys_suspended,

@@ -9,6 +9,7 @@ import { Modal } from "../components/ui/Modal";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Panel } from "../components/ui/Panel";
 import { api, assetUrl, formatBytes, formatDate, type Clip } from "../lib/api";
+import { toast } from "../lib/toast";
 
 export default function Library() {
   const [clips, setClips] = useState<Clip[]>([]);
@@ -46,6 +47,26 @@ export default function Library() {
       .catch(() => {});
     return () => unlisten?.();
   }, [refresh]);
+
+  // Repair clips saved by older builds that declared the whole recording
+  // session as the clip's duration. Runs in the background and is a no-op once
+  // every clip is already correct.
+  useEffect(() => {
+    let active = true;
+    api
+      .repairClips()
+      .then((count) => {
+        if (active && count > 0) {
+          toast(
+            `Repaired ${count} older clip${count === 1 ? "" : "s"} that had the wrong duration.`,
+          );
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function remove(clip: Clip) {
     setPendingDelete(null);
