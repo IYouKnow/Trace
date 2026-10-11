@@ -126,7 +126,6 @@ export default function Library() {
                 <button
                   type="button"
                   aria-label={`Play ${clip.name}`}
-                  title={clip.name}
                   onClick={() => setPlaying(clip)}
                   className="absolute inset-0 z-10 cursor-pointer"
                 />
@@ -143,7 +142,6 @@ export default function Library() {
                   <button
                     type="button"
                     aria-label={`Open ${clip.name} in player`}
-                    title="Open in player"
                     onClick={() => api.openClip(clip.path)}
                     className={OVERLAY_BUTTON}
                   >
@@ -152,7 +150,6 @@ export default function Library() {
                   <button
                     type="button"
                     aria-label={`Reveal ${clip.name} in folder`}
-                    title="Reveal in folder"
                     onClick={() => api.revealClip(clip.path)}
                     className={OVERLAY_BUTTON}
                   >
@@ -161,7 +158,6 @@ export default function Library() {
                   <button
                     type="button"
                     aria-label={`Delete ${clip.name}`}
-                    title="Delete clip"
                     onClick={() => setPendingDelete(clip)}
                     className={`${OVERLAY_BUTTON} hover:bg-rec`}
                   >
@@ -170,7 +166,7 @@ export default function Library() {
                 </div>
 
                 <div className={`${REVEAL} pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center justify-between gap-2 p-2.5`}>
-                  <span className="truncate text-[12px] font-medium text-white" title={clip.name}>
+                  <span className="truncate text-[12px] font-medium text-white">
                     {clip.name}
                   </span>
                   <span className="shrink-0 text-[11px] text-white/70">

@@ -226,6 +226,12 @@ impl MixState {
     }
 }
 
+/// How many captured frames may wait for the encoder before capture starts
+/// dropping them. Each queued frame holds a hardware frame-pool surface, so this
+/// stays small: a slow patch (or a clip write) must not pin more surfaces than
+/// the pool holds.
+const FRAME_QUEUE_DEPTH: usize = 4;
+
 /// A running replay session.
 pub struct ReplaySession {
     commands: Sender<Command>,
@@ -240,8 +246,8 @@ impl ReplaySession {
     /// Starts capturing the primary monitor and filling the replay buffer.
     pub fn start(config: ReplayConfig, clips_dir: PathBuf) -> Result<Self> {
         // Bounded: if the encoder ever falls behind, frames are dropped rather
-        // than piling up in memory.
-        let (frame_tx, frame_rx) = bounded::<CaptureMessage>(4);
+        // than piling up in memory (and pinning hardware frame-pool surfaces).
+        let (frame_tx, frame_rx) = bounded::<CaptureMessage>(FRAME_QUEUE_DEPTH);
         let (command_tx, command_rx) = bounded::<Command>(4);
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(SessionStats::default());

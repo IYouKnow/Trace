@@ -282,39 +282,24 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
             }
         }
 
+        // Building the payload can fail for transient reasons — most of all the
+        // hardware frame pool being momentarily exhausted while the encoder still
+        // holds frames the capture side has not recycled. A dropped frame is the
+        // right response: returning the error here would halt capture for good.
         let pipeline = self.pipeline.as_ref().unwrap();
-        let data = match pipeline.path {
-            CapturePath::ZeroCopy => {
-                let hw_frames = pipeline.hw_frames.as_ref().unwrap();
-                let processor = pipeline.processor.as_ref().unwrap();
-                let mut hw_frame = hw_frames.get_frame()?;
-                unsafe {
-                    processor.convert(frame.as_raw_texture(), hw_frame.slice_index())?;
-                }
-                // Submit the blit before the encoder picks the texture up.
-                if let Some(gpu) = pipeline.gpu.as_ref() {
-                    let _ = unsafe { gpu.context.Flush() };
-                }
-                hw_frame.set_pts(timestamp_micros);
-                CapturedData::Hw(hw_frame)
-            }
-            CapturePath::GpuDownload => {
-                let hw_frames = pipeline.hw_frames.as_ref().unwrap();
-                let processor = pipeline.processor.as_ref().unwrap();
-                let hw_frame = hw_frames.get_frame()?;
-                unsafe {
-                    processor.convert(frame.as_raw_texture(), hw_frame.slice_index())?;
-                }
-                let cpu = hw_frame.download_nv12()?;
-                unsafe {
-                    (*cpu).pts = timestamp_micros;
-                }
-                CapturedData::Nv12(Nv12Frame(cpu))
-            }
-            CapturePath::CpuFallback => {
-                let (data, pitch) =
-                    readback_bgra(&self.device, &self.context, &mut self.readback, frame)?;
-                CapturedData::Bgra { data, pitch }
+        let data = match build_frame_data(
+            pipeline,
+            &self.device,
+            &self.context,
+            &mut self.readback,
+            frame,
+            timestamp_micros,
+        ) {
+            Ok(data) => data,
+            Err(error) => {
+                self.stats.record_dropped();
+                report_frame_error(&error);
+                return Ok(());
             }
         };
 
@@ -485,6 +470,62 @@ fn readback_bgra(
         context.Unmap(staging.texture(), 0);
         Ok((data, pitch))
     }
+}
+
+/// Converts one captured frame into the pixel payload the encoder consumes,
+/// following the pipeline chosen at startup.
+fn build_frame_data(
+    pipeline: &Pipeline,
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    readback: &mut Option<StagingTexture>,
+    frame: &Frame<'_>,
+    timestamp_micros: i64,
+) -> Result<CapturedData, BoxError> {
+    Ok(match pipeline.path {
+        CapturePath::ZeroCopy => {
+            let hw_frames = pipeline.hw_frames.as_ref().unwrap();
+            let processor = pipeline.processor.as_ref().unwrap();
+            let mut hw_frame = hw_frames.get_frame()?;
+            unsafe {
+                processor.convert(frame.as_raw_texture(), hw_frame.slice_index())?;
+            }
+            // Submit the blit before the encoder picks the texture up.
+            if let Some(gpu) = pipeline.gpu.as_ref() {
+                let _ = unsafe { gpu.context.Flush() };
+            }
+            hw_frame.set_pts(timestamp_micros);
+            CapturedData::Hw(hw_frame)
+        }
+        CapturePath::GpuDownload => {
+            let hw_frames = pipeline.hw_frames.as_ref().unwrap();
+            let processor = pipeline.processor.as_ref().unwrap();
+            let hw_frame = hw_frames.get_frame()?;
+            unsafe {
+                processor.convert(frame.as_raw_texture(), hw_frame.slice_index())?;
+            }
+            let cpu = hw_frame.download_nv12()?;
+            unsafe {
+                (*cpu).pts = timestamp_micros;
+            }
+            CapturedData::Nv12(Nv12Frame(cpu))
+        }
+        CapturePath::CpuFallback => {
+            let (data, pitch) = readback_bgra(device, context, readback, frame)?;
+            CapturedData::Bgra { data, pitch }
+        }
+    })
+}
+
+/// Reports the first frame-drop reason once, so a transient failure (such as the
+/// hardware frame pool running dry) does not flood the console every frame it
+/// lasts. Drops are still counted in the session stats.
+fn report_frame_error(error: &BoxError) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        eprintln!("dropped a captured frame: {error:#}");
+    });
 }
 
 /// Grabs the first non-empty frame of the primary monitor and writes it as a PNG.

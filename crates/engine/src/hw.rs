@@ -53,7 +53,14 @@ pub const BIND_CANDIDATES: &[u32] = &[
 ];
 
 /// Number of NV12 frames kept in the hardware pool.
-pub const FRAME_POOL_SIZE: u32 = 8;
+///
+/// Every frame that is live at once is borrowed from this static pool: the
+/// capture→encoder queue (see `session`'s frame queue depth) plus whatever the
+/// hardware encoder is still holding until it emits their packets. If the pool
+/// is ever fully borrowed, `av_hwframe_get_buffer` fails with "Static surface
+/// pool size exceeded", so this is sized with headroom above the expected peak.
+/// Drivers cap the array size, so `create_texture` may still shrink it.
+pub const FRAME_POOL_SIZE: u32 = 16;
 
 fn hr(code: i32) -> anyhow::Error {
     anyhow!("hardware call failed (0x{:08x})", code as u32)
