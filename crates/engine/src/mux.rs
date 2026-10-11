@@ -18,6 +18,15 @@ fn sort_key(packet: &Packet) -> i64 {
     packet.dts().or_else(|| packet.pts()).unwrap_or(0)
 }
 
+/// The earliest timestamp a packet carries, considering both pts and dts.
+fn earliest_ts(packet: &Packet) -> Option<i64> {
+    match (packet.pts(), packet.dts()) {
+        (Some(pts), Some(dts)) => Some(pts.min(dts)),
+        (Some(ts), None) | (None, Some(ts)) => Some(ts),
+        (None, None) => None,
+    }
+}
+
 /// Writes the video packets plus one or more audio tracks into a new MP4 at
 /// `path`. Packets are stream-copied (no re-encode) and written in timestamp
 /// order so the file is properly interleaved.
@@ -82,12 +91,35 @@ pub fn write_mp4(
     }
     order.sort_by_key(|(key, _, _, _)| *key);
 
+    // Packets carry absolute timestamps (microseconds since the session began),
+    // so a clip taken after a long recording would otherwise keep a container
+    // duration equal to the whole session while only the buffered window holds
+    // real data. Rebase every packet by the earliest timestamp so the clip
+    // starts at zero and its duration matches its contents. One shared offset
+    // across all streams keeps audio and video in sync.
+    let offset = video_packets
+        .iter()
+        .chain(audios.iter().flat_map(|(_, packets)| packets.iter()))
+        .filter_map(earliest_ts)
+        .min()
+        .unwrap_or(0);
+
     for (_key, stream_index, out_base, source) in order {
         let packet = match source {
             Source::Video(index) => &mut video_packets[index],
             Source::Audio(track, index) => &mut audios[track].1[index],
         };
         packet.set_stream(stream_index);
+        // Shift the origin before rescaling so the offset is scaled along with
+        // the timestamps.
+        if offset != 0 {
+            if let Some(pts) = packet.pts() {
+                packet.set_pts(Some(pts - offset));
+            }
+            if let Some(dts) = packet.dts() {
+                packet.set_dts(Some(dts - offset));
+            }
+        }
         if out_base.0 != 0 && out_base.1 != 0 {
             packet.rescale_ts(in_time_base, out_base);
         }
