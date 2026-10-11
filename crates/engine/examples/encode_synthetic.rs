@@ -52,8 +52,8 @@ fn main() -> anyhow::Result<()> {
     );
 
     let time_base = ring.time_base();
-    let packets = ring.slice_mut(range);
-    mux::write_mp4(&out, (encoder.inner(), packets), &mut [], time_base)?;
+    let packets: &[ffmpeg_next::Packet] = ring.slice_mut(range);
+    mux::write_mp4(&out, (encoder.inner(), packets), &[], time_base)?;
 
     println!("wrote {}", out.display());
     Ok(())

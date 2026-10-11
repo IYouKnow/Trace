@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use ffmpeg_next as ffmpeg;
+use ffmpeg::codec::packet::{Mut, Ref};
 use ffmpeg::Packet;
 
 /// Where one packet lives in the caller's slices, so packets from every stream
@@ -27,18 +28,41 @@ fn earliest_ts(packet: &Packet) -> Option<i64> {
     }
 }
 
+/// Duplicates `packet` for writing, sharing its payload by reference count.
+///
+/// `av_interleaved_write_frame` takes ownership of the packet it is handed and
+/// resets it, so a buffered packet (the replay ring's) must never be written
+/// directly. Duplicating leaves the original intact for the next clip, and
+/// sharing the buffer avoids copying the compressed bytes.
+fn duplicate(packet: &Packet) -> Packet {
+    let mut copy = Packet::empty();
+    unsafe {
+        ffmpeg::ffi::av_packet_ref(copy.as_mut_ptr(), packet.as_ptr());
+    }
+    copy
+}
+
 /// Writes the video packets plus one or more audio tracks into a new MP4 at
 /// `path`. Packets are stream-copied (no re-encode) and written in timestamp
-/// order so the file is properly interleaved.
+/// order so the file is properly interleaved. The caller's packets are left
+/// untouched.
 pub fn write_mp4(
     path: &Path,
-    video: (&ffmpeg::encoder::video::Encoder, &mut [Packet]),
-    audios: &mut [(&ffmpeg::encoder::audio::Encoder, &mut [Packet])],
+    video: (&ffmpeg::encoder::video::Encoder, &[Packet]),
+    audios: &[(&ffmpeg::encoder::audio::Encoder, &[Packet])],
     in_time_base: ffmpeg::Rational,
 ) -> Result<()> {
     let mut output = ffmpeg::format::output(path)?;
 
     let (video_encoder, video_packets) = video;
+
+    // Work on private duplicates: `av_interleaved_write_frame` consumes each
+    // packet it is handed, and these packets live on in the replay ring.
+    let mut video_packets: Vec<Packet> = video_packets.iter().map(duplicate).collect();
+    let mut audios: Vec<(&ffmpeg::encoder::audio::Encoder, Vec<Packet>)> = audios
+        .iter()
+        .map(|(encoder, packets)| (*encoder, packets.iter().map(duplicate).collect()))
+        .collect();
 
     // The stream borrow must end before `write_header`, which sets the muxer's
     // own time base.

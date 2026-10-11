@@ -1,15 +1,22 @@
 import { listen } from "@tauri-apps/api/event";
-import { Film, FolderOpen, Play, RefreshCw, Trash2 } from "lucide-react";
+import { ExternalLink, Film, FolderOpen, Play, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { ClipThumbnail } from "../components/ClipThumbnail";
+import { WindowControls } from "../components/WindowControls";
 import { Banner } from "../components/ui/Banner";
-import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Modal } from "../components/ui/Modal";
-import { PageHeader } from "../components/ui/PageHeader";
+import { Lightbox } from "../components/ui/Lightbox";
 import { Panel } from "../components/ui/Panel";
-import { api, assetUrl, formatBytes, formatDate, type Clip } from "../lib/api";
+import { api, assetUrl, formatBytes, type Clip } from "../lib/api";
 import { toast } from "../lib/toast";
+
+/// Icon buttons that fade in over a thumbnail on hover or keyboard focus.
+const OVERLAY_BUTTON =
+  "grid size-8 cursor-pointer place-items-center rounded-[var(--radius-control)] bg-black/55 text-white backdrop-blur transition-colors duration-150 hover:bg-black/80";
+
+/// Shared reveal for everything that follows the tile's hover/focus state.
+const REVEAL = "opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100";
 
 export default function Library() {
   const [clips, setClips] = useState<Clip[]>([]);
@@ -68,6 +75,8 @@ export default function Library() {
     };
   }, []);
 
+  const closeLightbox = useCallback(() => setPlaying(null), []);
+
   async function remove(clip: Clip) {
     setPendingDelete(null);
     try {
@@ -80,17 +89,14 @@ export default function Library() {
 
   return (
     <>
-      <PageHeader title="Library" description="Clips saved under your Videos folder.">
-        <Button
-          disabled={loading}
-          icon={<RefreshCw className="size-4" />}
-          onClick={refresh}
-        >
-          {loading ? "Refreshing…" : "Refresh"}
-        </Button>
-      </PageHeader>
+      <header
+        data-tauri-drag-region="deep"
+        className="sticky top-0 z-20 flex h-9 shrink-0 items-center justify-end bg-canvas px-1.5"
+      >
+        <WindowControls />
+      </header>
 
-      <div className="flex flex-col gap-4 p-6">
+      <div className="flex flex-col gap-4 px-6 pb-6 pt-3">
         {error && <Banner tone="error">{error}</Banner>}
 
         {clips.length === 0 ? (
@@ -106,50 +112,70 @@ export default function Library() {
             )}
           </Panel>
         ) : (
-          <ul className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3.5">
+          <ul className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3.5">
             {clips.map((clip) => (
               <li
                 key={clip.path}
-                className="flex flex-col overflow-hidden rounded-[var(--radius-panel)] border border-line bg-surface"
+                className="group relative aspect-video overflow-hidden rounded-[var(--radius-panel)] border border-line bg-surface"
               >
+                <div className="absolute inset-0 transition-transform duration-300 group-hover:scale-[1.03]">
+                  <ClipThumbnail src={assetUrl(clip.path)} />
+                </div>
+
+                {/* Full-tile play target, under the overlay controls. */}
                 <button
                   type="button"
                   aria-label={`Play ${clip.name}`}
+                  title={clip.name}
                   onClick={() => setPlaying(clip)}
-                  className="grid h-28 cursor-pointer place-items-center border-b border-line bg-elevated text-ink-muted transition-colors duration-150 hover:text-ink"
-                >
-                  <Play className="size-6" />
-                </button>
-                <div className="px-3 pt-2.5">
-                  <div className="truncate text-sm font-medium" title={clip.name}>
-                    {clip.name}
-                  </div>
-                  <div className="mt-0.5 text-[12px] text-ink-muted">
-                    {formatBytes(clip.size_bytes)} · {formatDate(clip.modified_ms)}
-                  </div>
+                  className="absolute inset-0 z-10 cursor-pointer"
+                />
+
+                <div className={`${REVEAL} pointer-events-none absolute inset-0 z-10 bg-gradient-to-t from-black/75 via-transparent to-transparent`} />
+
+                <div className={`${REVEAL} pointer-events-none absolute inset-0 z-10 grid place-items-center`}>
+                  <span className="grid size-11 place-items-center rounded-full bg-black/55 text-white backdrop-blur">
+                    <Play className="size-5 fill-current" />
+                  </span>
                 </div>
-                <div className="flex flex-wrap gap-1.5 p-3">
-                  <Button size="sm" onClick={() => setPlaying(clip)}>
-                    Play
-                  </Button>
-                  <Button size="sm" onClick={() => api.openClip(clip.path)}>
-                    Open
-                  </Button>
-                  <Button
-                    size="sm"
-                    icon={<FolderOpen className="size-3.5" />}
+
+                <div className={`${REVEAL} pointer-events-none absolute right-2 top-2 z-20 flex gap-1 group-hover:pointer-events-auto group-focus-within:pointer-events-auto`}>
+                  <button
+                    type="button"
+                    aria-label={`Open ${clip.name} in player`}
+                    title="Open in player"
+                    onClick={() => api.openClip(clip.path)}
+                    className={OVERLAY_BUTTON}
+                  >
+                    <ExternalLink className="size-4" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Reveal ${clip.name} in folder`}
+                    title="Reveal in folder"
                     onClick={() => api.revealClip(clip.path)}
+                    className={OVERLAY_BUTTON}
                   >
-                    Folder
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    icon={<Trash2 className="size-3.5" />}
+                    <FolderOpen className="size-4" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Delete ${clip.name}`}
+                    title="Delete clip"
                     onClick={() => setPendingDelete(clip)}
+                    className={`${OVERLAY_BUTTON} hover:bg-rec`}
                   >
-                    Delete
-                  </Button>
+                    <Trash2 className="size-4" />
+                  </button>
+                </div>
+
+                <div className={`${REVEAL} pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center justify-between gap-2 p-2.5`}>
+                  <span className="truncate text-[12px] font-medium text-white" title={clip.name}>
+                    {clip.name}
+                  </span>
+                  <span className="shrink-0 text-[11px] text-white/70">
+                    {formatBytes(clip.size_bytes)}
+                  </span>
                 </div>
               </li>
             ))}
@@ -157,24 +183,7 @@ export default function Library() {
         )}
       </div>
 
-      {playing && (
-        <Modal title={playing.name} onClose={() => setPlaying(null)}>
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <strong className="truncate text-sm" title={playing.name}>
-              {playing.name}
-            </strong>
-            <Button size="sm" onClick={() => setPlaying(null)}>
-              Close
-            </Button>
-          </div>
-          <video
-            className="max-h-[60vh] w-full rounded-[var(--radius-control)] bg-black"
-            src={assetUrl(playing.path)}
-            controls
-            autoPlay
-          />
-        </Modal>
-      )}
+      {playing && <Lightbox clip={playing} onClose={closeLightbox} />}
 
       {pendingDelete && (
         <ConfirmDialog

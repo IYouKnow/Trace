@@ -61,14 +61,17 @@ fn main() -> anyhow::Result<()> {
         audio_ring_b.len()
     );
 
-    let mut audio_streams = [
-        (audio_encoder_a.inner(), audio_ring_a.slice_mut(audio_range_a)),
-        (audio_encoder_b.inner(), audio_ring_b.slice_mut(audio_range_b)),
+    let packets_a: &[ffmpeg_next::Packet] = audio_ring_a.slice_mut(audio_range_a);
+    let packets_b: &[ffmpeg_next::Packet] = audio_ring_b.slice_mut(audio_range_b);
+    let audio_streams = [
+        (audio_encoder_a.inner(), packets_a),
+        (audio_encoder_b.inner(), packets_b),
     ];
+    let video_packets: &[ffmpeg_next::Packet] = video_ring.slice_mut(video_range);
     mux::write_mp4(
         &out,
-        (video_encoder.inner(), video_ring.slice_mut(video_range)),
-        &mut audio_streams,
+        (video_encoder.inner(), video_packets),
+        &audio_streams,
         time_base,
     )?;
 

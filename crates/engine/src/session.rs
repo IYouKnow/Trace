@@ -659,7 +659,9 @@ fn save(
     std::fs::create_dir_all(clips_dir)?;
     let path = clips_dir.join(format!("clip-{}.mp4", timestamp()));
     let time_base = ring.time_base();
-    let video_packets = ring.slice_mut(range);
+    // Borrowed, not consumed: `write_mp4` duplicates the packets it writes, so
+    // the ring keeps its buffer for the next clip.
+    let video_packets: &[ffmpeg::Packet] = ring.slice_mut(range);
 
     // The clip's video window, so each audio track can be cut to match.
     let start_pts = video_packets
@@ -671,14 +673,15 @@ fn save(
         .and_then(|packet| packet.pts())
         .unwrap_or(i64::MAX);
 
-    let mut audio_streams: Vec<(&ffmpeg::encoder::audio::Encoder, &mut [ffmpeg::Packet])> =
+    let mut audio_streams: Vec<(&ffmpeg::encoder::audio::Encoder, &[ffmpeg::Packet])> =
         Vec::new();
 
     // The mixed track goes first, so players default to the combined audio.
     if let (Some(mixer), Some(mix_ring)) = (mix.mixer.as_ref(), mix.ring.as_mut()) {
         let mix_range = mix_ring.range_for_window(start_pts, end_pts);
         if !mix_range.is_empty() {
-            audio_streams.push((mixer.inner(), mix_ring.slice_mut(mix_range)));
+            let mix_packets: &[ffmpeg::Packet] = mix_ring.slice_mut(mix_range);
+            audio_streams.push((mixer.inner(), mix_packets));
         }
     }
 
@@ -692,13 +695,14 @@ fn save(
         if audio_range.is_empty() {
             continue;
         }
-        audio_streams.push((audio_encoder.inner(), audio_ring.slice_mut(audio_range)));
+        let audio_packets: &[ffmpeg::Packet] = audio_ring.slice_mut(audio_range);
+        audio_streams.push((audio_encoder.inner(), audio_packets));
     }
 
     mux::write_mp4(
         &path,
         (encoder.inner(), video_packets),
-        &mut audio_streams,
+        &audio_streams,
         time_base,
     )?;
     Ok(path)
