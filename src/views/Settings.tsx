@@ -229,6 +229,19 @@ export default function SettingsView({
           )}
         </Panel>
 
+        <Panel title="Startup">
+          {!settings ? (
+            <p className="text-[13px] text-ink-muted">Loading…</p>
+          ) : (
+            <Switch
+              label="Launch Trace at Windows startup"
+              description="Open in the tray when you sign in to Windows."
+              checked={settings.launch_at_login}
+              onChange={(value) => update({ launch_at_login: value })}
+            />
+          )}
+        </Panel>
+
         <Panel title="Microphone test">
           <div className="flex flex-col gap-3">
             <p className="text-[13px] text-ink-muted">

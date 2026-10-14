@@ -51,6 +51,7 @@ export type MicTestStatus = {
 
 export type Settings = {
   auto_start: boolean;
+  launch_at_login: boolean;
   buffer_seconds: number;
   fps: number;
   bitrate: number;

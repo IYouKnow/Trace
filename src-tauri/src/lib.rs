@@ -12,6 +12,7 @@ use trace_engine::session::{AudioConfig, ReplayConfig, ReplaySession, SessionSta
 use trace_library::{self as library, ClipSummary};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -23,6 +24,9 @@ mod tray;
 
 /// Folder name under the user's Videos directory.
 const CLIPS_FOLDER: &str = "Trace";
+
+/// Argument the startup registration passes so a boot launch opens to the tray.
+const HIDDEN_ARG: &str = "--hidden";
 
 /// Guards against overlapping clip-repair passes.
 static REPAIRING: AtomicBool = AtomicBool::new(false);
@@ -83,6 +87,9 @@ struct Settings {
     /// Start capturing automatically when the app launches.
     #[serde(default)]
     auto_start: bool,
+    /// Launch Trace automatically when the user signs in to Windows.
+    #[serde(default = "default_true")]
+    launch_at_login: bool,
     /// Seconds of video kept in the replay buffer.
     buffer_seconds: u32,
     fps: u32,
@@ -100,10 +107,16 @@ struct Settings {
     microphone_device: Option<String>,
 }
 
+/// Serde default for settings that ship enabled.
+fn default_true() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             auto_start: false,
+            launch_at_login: true,
             buffer_seconds: 60,
             fps: 60,
             bitrate: 20_000_000,
@@ -390,6 +403,19 @@ fn run_hotkey_action(app: &AppHandle, state: &AppState, action: HotkeyAction) {
     }
 }
 
+/// Enables or disables the Windows startup entry to match the preference.
+fn apply_autostart(app: &AppHandle, enabled: bool) {
+    let manager = app.autolaunch();
+    let result = if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    if let Err(error) = result {
+        eprintln!("failed to update autostart: {error}");
+    }
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Settings {
     state
@@ -406,6 +432,7 @@ fn set_settings(
     settings: Settings,
 ) -> Result<(), String> {
     settings::persist(&app, &settings)?;
+    apply_autostart(&app, settings.launch_at_login);
     if let Ok(mut current) = state.settings.lock() {
         *current = settings;
     }
@@ -656,6 +683,13 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             tray::show_window(app);
         }))
+        // Registers or clears the Windows startup entry (HKCU\...\Run) to match
+        // the launch-at-login setting. A boot launch passes `--hidden` so `setup`
+        // opens to the tray instead of the screen.
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![HIDDEN_ARG]),
+        ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
@@ -677,6 +711,18 @@ pub fn run() {
             let state = app.state::<AppState>();
             if let Ok(mut current) = state.settings.lock() {
                 *current = settings::load(&handle);
+            }
+
+            // Reconcile the Windows startup entry with the stored preference.
+            // Release-only so `tauri dev` never registers the debug binary.
+            #[cfg(not(debug_assertions))]
+            {
+                let launch = state
+                    .settings
+                    .lock()
+                    .map(|settings| settings.launch_at_login)
+                    .unwrap_or(false);
+                apply_autostart(&handle, launch);
             }
 
             // Arm global hotkeys. The hook forwards matches to a worker thread so
@@ -708,6 +754,13 @@ pub fn run() {
             }
             if let Err(error) = tray::build(&handle) {
                 eprintln!("failed to create tray icon: {error}");
+            }
+
+            // The window starts hidden (see tauri.conf.json) so a boot launch
+            // never flashes on screen; show it now unless this is one.
+            let start_hidden = std::env::args().any(|arg| arg == HIDDEN_ARG);
+            if !start_hidden {
+                tray::show_window(&handle);
             }
 
             // Optionally begin capturing at launch, off the setup path so opening
