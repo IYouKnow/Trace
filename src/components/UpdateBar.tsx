@@ -34,6 +34,7 @@ export function UpdateBar({ updater }: Props) {
         <Button
           variant="primary"
           size="xs"
+          className={phase === "available" ? "update-highlight" : undefined}
           loading={phase === "downloading"}
           disabled={phase !== "available"}
           onClick={() => install()}

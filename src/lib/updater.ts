@@ -1,6 +1,7 @@
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useCallback, useRef, useState } from "react";
+import { notifyUpdateAvailable } from "./notifications";
 
 export type UpdaterPhase =
   | "idle"
@@ -32,6 +33,8 @@ export function useUpdater(): Updater {
 
   // The plugin resource isn't serialisable, so it lives in a ref, not state.
   const pending = useRef<Update | null>(null);
+  // Version already toasted about, so a repeated check doesn't notify twice.
+  const notified = useRef<string | null>(null);
 
   const checkForUpdate = useCallback(async ({ silent = false } = {}) => {
     setPhase("checking");
@@ -43,6 +46,11 @@ export function useUpdater(): Updater {
         setVersion(update.version);
         setNotes(update.body ?? null);
         setPhase("available");
+        // Announce the new version with a native toast, once per version.
+        if (notified.current !== update.version) {
+          notified.current = update.version;
+          notifyUpdateAvailable(update.version).catch(() => {});
+        }
       } else {
         setVersion(null);
         setNotes(null);

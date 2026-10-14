@@ -130,6 +130,20 @@
     0 28px 80px -42px color-mix(in oklab, var(--rec) 85%, transparent);
 }
 
+@keyframes update-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 65%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent) 0%, transparent);
+  }
+}
+
+.update-highlight {
+  animation: update-pulse 1.8s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

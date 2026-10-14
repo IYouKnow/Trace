@@ -6,6 +6,7 @@ import { Toaster } from "./components/ui/Toaster";
 import { UpdateBar } from "./components/UpdateBar";
 import { api, type Status } from "./lib/api";
 import type { View } from "./lib/nav";
+import { initNotifications } from "./lib/notifications";
 import { useSidebarCollapsed } from "./lib/sidebar";
 import { useTheme } from "./lib/theme";
 import { useUpdater } from "./lib/updater";
@@ -51,9 +52,11 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
-  // Check for a new release once at startup; the result lights up Settings.
+  // Register the toast button before the first check: desktop only renders a
+  // notification's actions while an onAction listener exists. Then check for a
+  // new release once at startup; the result lights up Settings.
   useEffect(() => {
-    updater.check({ silent: true });
+    initNotifications().finally(() => updater.check({ silent: true }));
   }, [updater.check]);
 
   return (

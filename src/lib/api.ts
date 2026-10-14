@@ -92,6 +92,8 @@ export const api = {
     invoke<void>("set_hotkeys_suspended", { suspended }),
 
   getVersion: () => getVersion(),
+
+  showUpdatePage: () => invoke<void>("show_update_page"),
 };
 
 /// Turns an absolute path into a URL the webview can load.

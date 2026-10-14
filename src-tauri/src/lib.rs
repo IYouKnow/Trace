@@ -669,6 +669,13 @@ async fn repair_clips(app: AppHandle) -> Result<usize, String> {
     Ok(repaired)
 }
 
+/// Brings the window forward on the Settings view, where updates are installed.
+#[tauri::command]
+fn show_update_page(app: AppHandle) {
+    tray::show_window(&app);
+    let _ = app.emit("navigate", "settings");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -824,6 +831,7 @@ pub fn run() {
             start_mic_test,
             stop_mic_test,
             mic_test_status,
+            show_update_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
