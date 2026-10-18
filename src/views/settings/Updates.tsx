@@ -5,14 +5,17 @@ import { Button } from "../../components/ui/Button";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { SettingsGroup } from "../../components/ui/SettingsGroup";
 import { SettingsRow } from "../../components/ui/SettingsRow";
+import { WhatsNew } from "../../components/WhatsNew";
 import { api } from "../../lib/api";
 import type { Updater } from "../../lib/updater";
+import type { WhatsNew as WhatsNewState } from "../../lib/whatsnew";
 
 type Props = {
   updater: Updater;
+  whatsNew: WhatsNewState;
 };
 
-export default function UpdatesPage({ updater }: Props) {
+export default function UpdatesPage({ updater, whatsNew }: Props) {
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -71,6 +74,14 @@ export default function UpdatesPage({ updater }: Props) {
             </Button>
           </SettingsRow>
         </SettingsGroup>
+
+        {whatsNew.release && (
+          <SettingsGroup title="What's new">
+            <div className="px-4 py-3.5">
+              <WhatsNew release={whatsNew.release} />
+            </div>
+          </SettingsGroup>
+        )}
       </div>
     </>
   );

@@ -1,16 +1,27 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { cx } from "../../lib/cx";
 
 type Props = {
   title: string;
   onClose: () => void;
   children: ReactNode;
+  /** Tailwind `max-w-*` class for the panel; defaults to `max-w-3xl`. */
+  width?: string;
+  /** Whether clicking the backdrop closes the dialog. Defaults to `true`. */
+  closeOnBackdrop?: boolean;
 };
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-export function Modal({ title, onClose, children }: Props) {
+export function Modal({
+  title,
+  onClose,
+  children,
+  width,
+  closeOnBackdrop = true,
+}: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -58,7 +69,7 @@ export function Modal({ title, onClose, children }: Props) {
   return createPortal(
     <div
       className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-6"
-      onMouseDown={onClose}
+      onMouseDown={closeOnBackdrop ? onClose : undefined}
     >
       <div
         ref={panelRef}
@@ -66,7 +77,10 @@ export function Modal({ title, onClose, children }: Props) {
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
-        className="w-full max-w-3xl rounded-[var(--radius-panel)] border border-line bg-surface p-4 shadow-xl outline-none"
+        className={cx(
+          "max-h-[calc(100vh-3rem)] w-full overflow-y-auto rounded-[var(--radius-panel)] border border-line bg-surface p-4 shadow-xl outline-none",
+          width ?? "max-w-3xl",
+        )}
         onMouseDown={(event) => event.stopPropagation()}
       >
         {children}

@@ -4,6 +4,7 @@ import { AppShell } from "./components/AppShell";
 import { Sidebar } from "./components/Sidebar";
 import { Toaster } from "./components/ui/Toaster";
 import { UpdateBar } from "./components/UpdateBar";
+import { WhatsNewDialog } from "./components/WhatsNewDialog";
 import { api, type Status } from "./lib/api";
 import { SETTINGS_SECTIONS, type View } from "./lib/nav";
 import { initNotifications } from "./lib/notifications";
@@ -11,6 +12,7 @@ import { SettingsProvider } from "./lib/settings";
 import { useSidebarCollapsed } from "./lib/sidebar";
 import { useTheme } from "./lib/theme";
 import { useUpdater } from "./lib/updater";
+import { useWhatsNew } from "./lib/whatsnew";
 import Home from "./views/Home";
 import Library from "./views/Library";
 import SettingsView from "./views/Settings";
@@ -23,6 +25,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState(SETTINGS_SECTIONS[0].id);
   const updater = useUpdater();
+  const whatsNew = useWhatsNew();
 
   const refresh = useCallback(async () => {
     try {
@@ -94,9 +97,13 @@ export default function App() {
             theme={theme}
             onThemeChange={setTheme}
             updater={updater}
+            whatsNew={whatsNew}
           />
         )}
         <Toaster />
+        {whatsNew.open && whatsNew.release && (
+          <WhatsNewDialog release={whatsNew.release} onClose={whatsNew.close} />
+        )}
       </AppShell>
     </SettingsProvider>
   );

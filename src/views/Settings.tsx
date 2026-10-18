@@ -1,6 +1,7 @@
 import type { Status } from "../lib/api";
 import type { Theme } from "../lib/theme";
 import type { Updater } from "../lib/updater";
+import type { WhatsNew } from "../lib/whatsnew";
 import AppearancePage from "./settings/Appearance";
 import CapturePage from "./settings/Capture";
 import GeneralPage from "./settings/General";
@@ -14,6 +15,7 @@ type Props = {
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   updater: Updater;
+  whatsNew: WhatsNew;
 };
 
 export default function SettingsView({
@@ -22,6 +24,7 @@ export default function SettingsView({
   theme,
   onThemeChange,
   updater,
+  whatsNew,
 }: Props) {
   switch (section) {
     case "general":
@@ -33,7 +36,7 @@ export default function SettingsView({
     case "storage":
       return <StoragePage clipsDir={status?.clips_dir} />;
     case "updates":
-      return <UpdatesPage updater={updater} />;
+      return <UpdatesPage updater={updater} whatsNew={whatsNew} />;
     default:
       return <CapturePage status={status} />;
   }
