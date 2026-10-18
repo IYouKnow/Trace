@@ -1,51 +1,74 @@
 # Trace
 
-A Windows screen replay tool: Trace continuously captures your primary monitor into a rolling
-buffer, so a hotkey or button can save the last N seconds as an `.mp4`. Under the hood it is a
-Tauri v2 desktop shell over a Rust capture/encode engine, with a React + TypeScript frontend.
+**Trace is a Windows screen replay tool.** It records your screen continuously in the
+background, keeping a rolling buffer of the last minute or so. When something worth keeping
+happens — a clutch play in a game, a bug you want to show someone — you press your hotkey and
+Trace saves the last few seconds to a video file.
 
-## Recommended IDE Setup
+You don't record a session and trim it afterwards. You just leave Trace running, and save the
+moment *after* it happens.
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## Features
 
-## Releasing
+**Never miss the moment**
+- A rolling replay buffer keeps the last 60 seconds in memory (adjustable from 10 to 300).
+- Save a clip with a global hotkey that fires even while a fullscreen game has focus.
+- Bind your own shortcuts in Settings → Hotkeys.
 
-Releases are built and published by [`.github/workflows/trace.yml`](.github/workflows/trace.yml).
-Pushing a tag that starts with `v` builds the NSIS and MSI installers for Windows, signs them
-for the in-app updater, and publishes a GitHub Release with a `latest.json` manifest.
+**Built for games**
+- Hardware-accelerated, zero-copy capture keeps the performance cost low.
+- Record at up to 240 fps, with the bitrate scaling to match automatically.
+- If Trace has to fall back to a software encoder it warns you, so you can install a GPU
+  driver before your PC starts feeling slow.
 
-```sh
-git tag v0.1.1
-git push origin v0.1.1
-```
+**Audio that sounds right**
+- Capture system sound, your microphone, or both at once.
+- Pick exactly which playback and recording devices to use.
+- Test your microphone in Settings with a live level meter before you record.
 
-The version in `src-tauri/tauri.conf.json` is overwritten from the tag during the build, so the
-committed version is just the local dev default.
+**Multi-monitor aware**
+- Choose which display Trace records instead of always taking the primary one.
+- If the display you picked gets unplugged, Trace quietly falls back to your primary monitor.
 
-### One-time setup
+**A real clip library**
+- Every clip is shown as a thumbnail.
+- Play one in a fullscreen player with keyboard controls — space to play or pause, arrow keys
+  to seek, Esc to close — or open it in your default player.
+- Reveal any clip in its folder, or delete it. Deleted clips go to the **Recycle Bin**, so a
+  mistake is easy to undo.
+- Clips saved by older versions are repaired automatically.
 
-1. **Public repo** — the updater downloads `latest.json` and the installer over plain HTTPS, so
-   the repository must be public (a private repo returns 404 for release assets).
-2. **Signing key** — the updater refuses unsigned bundles. Generate a password-protected
-   keypair (the CLI prompts for the password):
+**Stays out of the way**
+- Runs in the system tray so it's out of your way while you play.
+- Optionally starts with Windows, so your buffer is always warm.
+- Light and dark themes.
 
-   ```sh
-   pnpm tauri signer generate -w ~/.tauri/trace.key
-   ```
+## Getting started
 
-   - Put the **public** key (`trace.key.pub`) in `plugins.updater.pubkey` in
-     `src-tauri/tauri.conf.json`.
-   - Add two repository secrets (Settings → Secrets and variables → Actions → New repository
-     secret): `TAURI_SIGNING_PRIVATE_KEY` (the private key) and
-     `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the password you chose).
-   - **Back up both the private key and its password somewhere private, and never commit
-     them.** If either is lost you must ship a new keypair, and apps already installed (which
-     trust the old public key) can no longer auto-update — users would have to reinstall
-     manually.
+1. Download the latest installer from the [Releases page](https://github.com/IYouKnow/Trace/releases)
+   and run it.
+2. Open Trace and press the play button on the **Home** screen to start the replay buffer.
+3. Go and play. When something happens, press **Save clip** — or your hotkey — and the last
+   minute is written to disk.
+4. Your clips appear in the **Library**, and the most recent ones show up on Home.
 
-### How updates reach users
+## Where clips are saved
 
-On launch (and from the **Updates** panel in Settings) the app checks the release manifest. When
-a newer version exists, Settings shows a banner with an **Update & restart** button that
-downloads, installs (Windows passive mode) and relaunches the app.
+Clips are ordinary `.mp4` files, saved to `Videos\Trace` — for example
+`C:\Users\<you>\Videos\Trace`. The exact path is shown in Settings → Storage.
 
+## Requirements
+
+- Windows (64-bit).
+- A GPU with a hardware video encoder is recommended. Without one, Trace uses a software
+  encoder and tells you about it.
+
+## Updates
+
+Trace checks for new versions by itself and lets you know when one is available, whether or not
+the window is open. Click **Update & restart** in Settings → Updates to install it. What changed
+in each version is listed right there, and shown once after an update.
+
+## Feedback
+
+Found a bug, or have an idea? Please [open an issue](https://github.com/IYouKnow/Trace/issues).
