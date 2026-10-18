@@ -48,9 +48,12 @@ export default function Home({ status, pollError, onChanged }: Props) {
     ? SOFTWARE_ENCODERS.includes(status.encoder)
     : false;
 
-  // The stored selection, or the primary display when none is stored.
+  // The remembered selection, falling back to the primary display when none is
+  // stored or the stored monitor is no longer attached.
   const selectedId =
-    status?.monitor ?? monitors.find((m) => m.is_primary)?.id ?? monitors[0]?.id;
+    (monitors.some((m) => m.id === status?.monitor) ? status?.monitor : null) ??
+    monitors.find((m) => m.is_primary)?.id ??
+    monitors[0]?.id;
 
   const loadClips = useCallback(async () => {
     try {
@@ -126,7 +129,7 @@ export default function Home({ status, pollError, onChanged }: Props) {
   /// Switches the recorded display. While replaying this restarts capture on
   /// the new monitor, so it can take a moment.
   async function selectMonitor(id: string) {
-    if (id === selectedId) return;
+    if (id === status?.monitor) return;
     setMonitorBusy(true);
     setError(null);
     try {
