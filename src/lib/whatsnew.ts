@@ -1,4 +1,25 @@
-import { Gauge, LayoutGrid, ListTree, type LucideIcon } from "lucide-react";
+import {
+  Activity,
+  AppWindow,
+  BellRing,
+  Cpu,
+  Film,
+  Gauge,
+  Info,
+  Keyboard,
+  LayoutGrid,
+  ListTree,
+  Maximize,
+  Mic,
+  Monitor,
+  MonitorCheck,
+  Power,
+  Rocket,
+  Trash,
+  Volume2,
+  Wrench,
+  type LucideIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 
@@ -41,6 +62,162 @@ export const RELEASES: Release[] = [
       },
     ],
   },
+  {
+    version: "0.4.0",
+    title: "Pick your monitor",
+    highlights: [
+      {
+        icon: Monitor,
+        title: "Choose a display",
+        description:
+          "Capture the screen you actually play on. Trace lists every connected monitor so you can pick the right one instead of guessing.",
+      },
+      {
+        icon: MonitorCheck,
+        title: "Never lose your capture",
+        description:
+          "If the monitor you picked gets unplugged, Trace falls back to your primary display rather than failing to start.",
+      },
+    ],
+  },
+  {
+    version: "0.3.4",
+    title: "Update alerts anywhere",
+    highlights: [
+      {
+        icon: BellRing,
+        title: "Native update notifications",
+        description:
+          "When a new version ships, a Windows notification tells you even if Trace is hidden in the tray — click it to jump straight to Updates.",
+      },
+    ],
+  },
+  {
+    version: "0.3.3",
+    title: "Start with Windows",
+    highlights: [
+      {
+        icon: Power,
+        title: "Launch at login",
+        description:
+          "Have Trace open with Windows and wait in the tray, so the replay buffer is already running before you get into a game.",
+      },
+    ],
+  },
+  {
+    version: "0.3.2",
+    title: "Playback and steadier capture",
+    highlights: [
+      {
+        icon: Maximize,
+        title: "Fullscreen player",
+        description:
+          "Clips open in an immersive lightbox with keyboard controls — space to play or pause, arrows to seek, Esc to close.",
+      },
+      {
+        icon: Activity,
+        title: "Smoother long sessions",
+        description:
+          "A larger frame pool and clearer pipeline errors mean fewer dropped frames, and an obvious reason when something does go wrong.",
+      },
+    ],
+  },
+  {
+    version: "0.3.1",
+    title: "Repair broken clips",
+    highlights: [
+      {
+        icon: Wrench,
+        title: "Automatic repairs",
+        description:
+          "Clips whose file was cut short are repaired quietly when the Library opens, so they play properly again.",
+      },
+      {
+        icon: Info,
+        title: "Toasts for what happens",
+        description:
+          "Saving, repairing and other actions confirm themselves with a brief toast instead of leaving you guessing.",
+      },
+    ],
+  },
+  {
+    version: "0.3.0",
+    title: "Tray, trash and shortcuts",
+    highlights: [
+      {
+        icon: AppWindow,
+        title: "Runs in the tray",
+        description:
+          "Trace lives in the system tray with its status and quick actions a click away, so it stays out of your way.",
+      },
+      {
+        icon: Keyboard,
+        title: "True global hotkeys",
+        description:
+          "A low-level keyboard hook makes your shortcuts fire even while a fullscreen game has focus.",
+      },
+      {
+        icon: Trash,
+        title: "Deletes you can undo",
+        description:
+          "Deleting a clip moves it to the Windows Recycle Bin instead of erasing it, so a mistake is easy to take back.",
+      },
+      {
+        icon: Rocket,
+        title: "Start recording on launch",
+        description:
+          "Choose whether Trace begins buffering automatically the moment it opens.",
+      },
+    ],
+  },
+  {
+    version: "0.2.0",
+    title: "Audio, properly",
+    highlights: [
+      {
+        icon: Mic,
+        title: "System and microphone capture",
+        description:
+          "Record game sound, your voice, or both at once — and choose exactly which devices Trace listens to.",
+      },
+      {
+        icon: Volume2,
+        title: "Microphone test",
+        description:
+          "Check your mic from Settings with a live input level, using the same capture path your clips use.",
+      },
+    ],
+  },
+  {
+    version: "0.1.1",
+    title: "Global hotkeys",
+    highlights: [
+      {
+        icon: Keyboard,
+        title: "Control Trace from anywhere",
+        description:
+          "Save a clip or toggle the replay buffer without leaving your game, with your bindings remembered between sessions.",
+      },
+    ],
+  },
+  {
+    version: "0.1.0",
+    title: "The first Trace",
+    highlights: [
+      {
+        icon: Film,
+        title: "Replay buffer",
+        description:
+          "Trace keeps the last few seconds of gameplay in memory, so you can save the moment just after it happens.",
+      },
+      {
+        icon: Cpu,
+        title: "Hardware-accelerated capture",
+        description:
+          "A zero-copy GPU pipeline with hardware encoder support keeps capture light even at high frame rates.",
+      },
+    ],
+  },
 ];
 
 const SEEN_KEY = "trace.whatsnew.seen";
@@ -70,11 +247,10 @@ export function releaseFor(version: string | null): Release | null {
 }
 
 /// Releases newer than `after`, up to and including `current`, newest first.
-/// `after` is the last version the user saw; null means "up to and including".
-export function releasesSince(after: string | null, current: string): Release[] {
+export function releasesSince(after: string, current: string): Release[] {
   return RELEASES.filter((release) => {
     if (compareVersions(release.version, current) > 0) return false;
-    if (after !== null && compareVersions(release.version, after) <= 0) return false;
+    if (compareVersions(release.version, after) <= 0) return false;
     return true;
   });
 }
@@ -136,7 +312,8 @@ export function useWhatsNew(): WhatsNew {
       .getVersion()
       .then((version) => {
         if (cancelled) return;
-        setRelease(releaseFor(version));
+        const current = releaseFor(version);
+        setRelease(current);
         setPrevious(olderReleases(version));
 
         const seen = readSeen();
@@ -146,8 +323,11 @@ export function useWhatsNew(): WhatsNew {
           return;
         }
 
-        // Skipped versions are announced too; a normal update yields just one.
-        const missed = releasesSince(seen, version);
+        // A build from before this feature left no marker, so there's no way to
+        // know what was already seen — announce only the version it landed on.
+        // Otherwise roll up every version skipped since the last seen one.
+        const missed =
+          seen === null ? (current ? [current] : []) : releasesSince(seen, version);
         writeSeen(version);
         if (missed.length > 0) {
           setPending(missed);
