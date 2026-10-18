@@ -37,6 +37,20 @@ export function Sidebar({
     if (view === "settings") setSettingsOpen(true);
   }, [view]);
 
+  function select(id: View) {
+    if (id !== "settings") {
+      onSelect(id);
+      return;
+    }
+    // Clicking Settings opens the section list (and goes there); clicking it
+    // again closes the list.
+    if (view === "settings") {
+      setSettingsOpen((open) => !open);
+    } else {
+      onSelect("settings");
+    }
+  }
+
   return (
     <aside
       className={cx(
@@ -83,9 +97,9 @@ export function Sidebar({
                 entry={entry}
                 active={view === entry.id}
                 collapsed={collapsed}
-                onSelect={() => onSelect(entry.id)}
+                onSelect={() => select(entry.id)}
+                expandable={isSettings}
                 expanded={isSettings ? settingsOpen : undefined}
-                onToggle={isSettings ? () => setSettingsOpen((open) => !open) : undefined}
               />
 
               {isSettings && settingsOpen && !collapsed && (

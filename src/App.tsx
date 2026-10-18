@@ -5,13 +5,13 @@ import { Sidebar } from "./components/Sidebar";
 import { Toaster } from "./components/ui/Toaster";
 import { UpdateBar } from "./components/UpdateBar";
 import { api, type Status } from "./lib/api";
-import { SETTINGS_SECTIONS, type SettingsTarget, type View } from "./lib/nav";
+import { SETTINGS_SECTIONS, type View } from "./lib/nav";
 import { initNotifications } from "./lib/notifications";
+import { SettingsProvider } from "./lib/settings";
 import { useSidebarCollapsed } from "./lib/sidebar";
 import { useTheme } from "./lib/theme";
 import { useUpdater } from "./lib/updater";
 import Home from "./views/Home";
-import Hotkeys from "./views/Hotkeys";
 import Library from "./views/Library";
 import SettingsView from "./views/Settings";
 
@@ -22,7 +22,6 @@ export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState(SETTINGS_SECTIONS[0].id);
-  const [settingsTarget, setSettingsTarget] = useState<SettingsTarget | null>(null);
   const updater = useUpdater();
 
   const refresh = useCallback(async () => {
@@ -36,7 +35,7 @@ export default function App() {
 
   const openSettingsSection = useCallback((id: string) => {
     setView("settings");
-    setSettingsTarget((current) => ({ id, nonce: (current?.nonce ?? 0) + 1 }));
+    setSettingsSection(id);
   }, []);
 
   useEffect(() => {
@@ -67,39 +66,38 @@ export default function App() {
   }, [updater.check]);
 
   return (
-    <AppShell
-      sidebar={
-        <Sidebar
-          view={view}
-          onSelect={setView}
-          theme={theme}
-          onThemeChange={setTheme}
-          replaying={status?.replaying ?? false}
-          collapsed={collapsed}
-          onToggle={toggleSidebar}
-          settingsSection={settingsSection}
-          onSelectSection={openSettingsSection}
-        />
-      }
-      bar={<UpdateBar updater={updater} />}
-    >
-      {view === "home" && (
-        <Home status={status} pollError={error} onChanged={refresh} />
-      )}
-      {view === "library" && <Library />}
-      {view === "settings" && (
-        <SettingsView
-          status={status}
-          theme={theme}
-          onThemeChange={setTheme}
-          onSaved={refresh}
-          updater={updater}
-          target={settingsTarget}
-          onSectionChange={setSettingsSection}
-        />
-      )}
-      {view === "hotkeys" && <Hotkeys />}
-      <Toaster />
-    </AppShell>
+    <SettingsProvider onSaved={refresh}>
+      <AppShell
+        sidebar={
+          <Sidebar
+            view={view}
+            onSelect={setView}
+            theme={theme}
+            onThemeChange={setTheme}
+            replaying={status?.replaying ?? false}
+            collapsed={collapsed}
+            onToggle={toggleSidebar}
+            settingsSection={settingsSection}
+            onSelectSection={openSettingsSection}
+          />
+        }
+        bar={<UpdateBar updater={updater} />}
+      >
+        {view === "home" && (
+          <Home status={status} pollError={error} onChanged={refresh} />
+        )}
+        {view === "library" && <Library />}
+        {view === "settings" && (
+          <SettingsView
+            section={settingsSection}
+            status={status}
+            theme={theme}
+            onThemeChange={setTheme}
+            updater={updater}
+          />
+        )}
+        <Toaster />
+      </AppShell>
+    </SettingsProvider>
   );
 }

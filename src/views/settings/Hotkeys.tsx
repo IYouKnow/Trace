@@ -1,11 +1,11 @@
 import { Keyboard, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Banner } from "../components/ui/Banner";
-import { Button } from "../components/ui/Button";
-import { PageHeader } from "../components/ui/PageHeader";
-import { Panel } from "../components/ui/Panel";
-import { api, type Hotkeys } from "../lib/api";
-import { cx } from "../lib/cx";
+import { Banner } from "../../components/ui/Banner";
+import { Button } from "../../components/ui/Button";
+import { PageHeader } from "../../components/ui/PageHeader";
+import { Panel } from "../../components/ui/Panel";
+import { api, type Hotkeys } from "../../lib/api";
+import { cx } from "../../lib/cx";
 
 type Field = keyof Hotkeys;
 
@@ -115,7 +115,7 @@ function duplicateError(hotkeys: Hotkeys): string | null {
   return null;
 }
 
-export default function HotkeysView() {
+export default function HotkeysPage() {
   const [hotkeys, setHotkeys] = useState<Hotkeys | null>(null);
   const [initial, setInitial] = useState<Hotkeys | null>(null);
   const [recording, setRecording] = useState<Field | null>(null);
