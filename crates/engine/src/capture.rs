@@ -381,7 +381,7 @@ fn build_gpu_pipeline(
     // Create and validate the GPU conversion *before* building any FFmpeg
     // context, so a fallback never has to tear one down.
     let (texture, slices) = hw::create_nv12_texture(gpu, width, height, pool, bind_flags)?;
-    let processor = VideoProcessor::new(gpu, &texture, slices, width, height)?;
+    let processor = VideoProcessor::new(gpu, &texture, slices, width, height, config.fps)?;
 
     let hw_frames = HwFrames::from_texture(
         gpu,

@@ -275,6 +275,15 @@ impl AppState {
     }
 }
 
+/// The bitrate actually handed to the encoder.
+///
+/// The stored setting is the target at 60 fps, so other frame rates scale it
+/// proportionally to keep roughly the same bits per frame (the buffer's memory
+/// scales with it too).
+fn effective_bitrate(bitrate: u64, fps: u32) -> u64 {
+    bitrate.saturating_mul(fps as u64) / 60
+}
+
 /// Starts capture if it is not already running and returns the fresh status.
 fn start_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, String> {
     let started_new = {
@@ -295,7 +304,7 @@ fn start_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, Strin
             let config = ReplayConfig {
                 encoder: settings.encoder.clone(),
                 fps: settings.fps,
-                bitrate: settings.bitrate,
+                bitrate: effective_bitrate(settings.bitrate, settings.fps),
                 buffer_seconds: settings.buffer_seconds as f64,
                 audio: settings.audio_source.config(
                     settings.system_device.clone(),

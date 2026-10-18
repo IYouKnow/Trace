@@ -68,6 +68,12 @@ export default function CapturePage({ status }: Props) {
     setMicTest(null);
   }
 
+  // The stored bitrate is a 60 fps reference; the slider shows what the encoder
+  // uses at the selected frame rate (20 Mbps at 60 fps, 40 at 120, and so on),
+  // so it follows the frame-rate dropdown without the user touching it.
+  const fpsScale = (settings?.fps ?? 60) / 60;
+  const bitrateMbps = Math.round(((settings?.bitrate ?? 0) * fpsScale) / 1_000_000);
+
   return (
     <>
       <PageHeader
@@ -106,16 +112,24 @@ export default function CapturePage({ status }: Props) {
                 >
                   <option value="30">30 fps</option>
                   <option value="60">60 fps</option>
+                  <option value="90">90 fps</option>
+                  <option value="120">120 fps</option>
+                  <option value="144">144 fps</option>
+                  <option value="240">240 fps</option>
                 </Select>
               </SettingsRow>
 
               <SettingsRow label="Bitrate">
                 <Slider
-                  min={5}
-                  max={50}
+                  min={Math.floor(5 * fpsScale)}
+                  max={Math.ceil(50 * fpsScale)}
                   step={1}
-                  value={Math.round(settings.bitrate / 1_000_000)}
-                  onChange={(value) => update({ bitrate: value * 1_000_000 })}
+                  value={bitrateMbps}
+                  onChange={(value) =>
+                    update({
+                      bitrate: Math.round((value * 1_000_000) / fpsScale),
+                    })
+                  }
                   format={(value) => `${value} Mbps`}
                 />
               </SettingsRow>

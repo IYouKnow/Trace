@@ -15,6 +15,7 @@ use windows::Win32::Graphics::Direct3D11::{
 
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
+const FPS: u32 = 60;
 
 fn main() -> anyhow::Result<()> {
     let feature_levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
@@ -72,6 +73,6 @@ fn main() -> anyhow::Result<()> {
 /// Attempts the texture + processor + output view for one candidate.
 fn build(gpu: &GpuDevice, bind_flags: u32, pool: u32) -> anyhow::Result<u32> {
     let (texture, slices) = hw::create_nv12_texture(gpu, WIDTH, HEIGHT, pool, bind_flags)?;
-    let _processor = VideoProcessor::new(gpu, &texture, slices, WIDTH, HEIGHT)?;
+    let _processor = VideoProcessor::new(gpu, &texture, slices, WIDTH, HEIGHT, FPS)?;
     Ok(slices)
 }

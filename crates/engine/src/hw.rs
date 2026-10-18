@@ -422,12 +422,17 @@ pub struct VideoProcessor {
 impl VideoProcessor {
     /// Creates a processor converting `width`x`height` BGRA into the NV12 array
     /// texture `texture` (which must have `slices` array elements).
+    ///
+    /// `fps` describes the content's frame rate. Input and output rates match, so
+    /// the processor passes frames through unchanged; a truthful rate keeps the
+    /// descriptor accurate on high-refresh displays.
     pub fn new(
         gpu: &GpuDevice,
         texture: &ID3D11Texture2D,
         slices: u32,
         width: u32,
         height: u32,
+        fps: u32,
     ) -> Result<Self> {
         let device: ID3D11VideoDevice = gpu
             .device
@@ -441,13 +446,13 @@ impl VideoProcessor {
         let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
             InputFrameRate: DXGI_RATIONAL {
-                Numerator: 60,
+                Numerator: fps.max(1),
                 Denominator: 1,
             },
             InputWidth: width,
             InputHeight: height,
             OutputFrameRate: DXGI_RATIONAL {
-                Numerator: 60,
+                Numerator: fps.max(1),
                 Denominator: 1,
             },
             OutputWidth: width,
