@@ -2,10 +2,9 @@ import type { Status } from "../lib/api";
 import type { Theme } from "../lib/theme";
 import type { Updater } from "../lib/updater";
 import AppearancePage from "./settings/Appearance";
-import AudioPage from "./settings/Audio";
+import CapturePage from "./settings/Capture";
 import GeneralPage from "./settings/General";
 import HotkeysPage from "./settings/Hotkeys";
-import RecordingPage from "./settings/Recording";
 import StoragePage from "./settings/Storage";
 import UpdatesPage from "./settings/Updates";
 
@@ -25,8 +24,6 @@ export default function SettingsView({
   updater,
 }: Props) {
   switch (section) {
-    case "audio":
-      return <AudioPage status={status} />;
     case "general":
       return <GeneralPage />;
     case "hotkeys":
@@ -38,6 +35,6 @@ export default function SettingsView({
     case "updates":
       return <UpdatesPage updater={updater} />;
     default:
-      return <RecordingPage encoders={status?.available_encoders ?? []} />;
+      return <CapturePage status={status} />;
   }
 }

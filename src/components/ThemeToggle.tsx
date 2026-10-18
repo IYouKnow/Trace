@@ -33,7 +33,6 @@ export function ThemeToggle({ theme, collapsed, onChange }: Props) {
             role="radio"
             aria-checked={active}
             aria-label={label}
-            title={label}
             onClick={() => onChange(value)}
             className={cx(
               "grid cursor-pointer place-items-center rounded-[6px] transition-colors duration-150",

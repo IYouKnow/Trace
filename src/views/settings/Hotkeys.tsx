@@ -3,7 +3,8 @@ import { useEffect, useState } from "react";
 import { Banner } from "../../components/ui/Banner";
 import { Button } from "../../components/ui/Button";
 import { PageHeader } from "../../components/ui/PageHeader";
-import { Panel } from "../../components/ui/Panel";
+import { SettingsGroup } from "../../components/ui/SettingsGroup";
+import { SettingsRow } from "../../components/ui/SettingsRow";
 import { api, type Hotkeys } from "../../lib/api";
 import { cx } from "../../lib/cx";
 
@@ -242,63 +243,50 @@ export default function HotkeysPage() {
         </Button>
       </PageHeader>
 
-      <div className="flex max-w-2xl flex-col gap-4 p-6">
+      <div className="flex max-w-2xl flex-col gap-6 p-6">
         {error && <Banner tone="error">{error}</Banner>}
 
         {!hotkeys ? (
           <p className="text-[13px] text-ink-muted">Loading…</p>
         ) : (
-          <Panel title="Global shortcuts" bodyClassName="p-0">
-            <ul className="divide-y divide-line">
-              {ACTIONS.map(({ field, label, hint }) => {
-                const value = hotkeys[field];
-                const isRecording = recording === field;
-                return (
-                  <li
-                    key={field}
-                    className="flex items-center justify-between gap-4 px-4 py-3"
+          <SettingsGroup title="Global shortcuts">
+            {ACTIONS.map(({ field, label, hint }) => {
+              const value = hotkeys[field];
+              const isRecording = recording === field;
+              return (
+                <SettingsRow key={field} plain label={label} description={hint}>
+                  <button
+                    type="button"
+                    onClick={() => startRecording(field)}
+                    className={cx(
+                      "inline-flex h-8 min-w-[9rem] cursor-pointer items-center justify-center rounded-[6px] border px-3 text-[12px] transition-colors",
+                      isRecording
+                        ? "border-accent bg-elevated text-ink"
+                        : "border-line bg-elevated text-ink-muted hover:border-line-strong hover:text-ink",
+                    )}
                   >
-                    <div className="flex min-w-0 flex-col">
-                      <span className="text-sm">{label}</span>
-                      <span className="text-[12px] text-ink-faint">{hint}</span>
-                    </div>
+                    {isRecording ? (
+                      "Press keys…"
+                    ) : value ? (
+                      formatAccelerator(value)
+                    ) : (
+                      <span className="text-ink-faint">Not set</span>
+                    )}
+                  </button>
 
-                    <div className="flex shrink-0 items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => startRecording(field)}
-                        title={value ? formatAccelerator(value) : "Set a shortcut"}
-                        className={cx(
-                          "inline-flex h-8 min-w-[9rem] items-center justify-center rounded-[6px] border px-3 text-[12px] transition-colors",
-                          isRecording
-                            ? "border-accent bg-elevated text-ink"
-                            : "border-line bg-elevated text-ink-muted hover:border-line-strong hover:text-ink",
-                        )}
-                      >
-                        {isRecording ? (
-                          "Press keys…"
-                        ) : value ? (
-                          formatAccelerator(value)
-                        ) : (
-                          <span className="text-ink-faint">Not set</span>
-                        )}
-                      </button>
-
-                      <button
-                        type="button"
-                        aria-label={`Clear ${label}`}
-                        disabled={!value || isRecording}
-                        onClick={() => clear(field)}
-                        className="grid size-8 cursor-pointer place-items-center rounded-[6px] border border-transparent text-ink-faint transition-colors hover:bg-elevated hover:text-ink disabled:pointer-events-none disabled:opacity-0"
-                      >
-                        <X className="size-3.5" />
-                      </button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </Panel>
+                  <button
+                    type="button"
+                    aria-label={`Clear ${label}`}
+                    disabled={!value || isRecording}
+                    onClick={() => clear(field)}
+                    className="grid size-8 cursor-pointer place-items-center rounded-[6px] border border-transparent text-ink-faint transition-colors hover:bg-elevated hover:text-ink disabled:pointer-events-none disabled:opacity-0"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </SettingsRow>
+              );
+            })}
+          </SettingsGroup>
         )}
 
         <p className="flex items-start gap-2 text-[12px] text-ink-faint">

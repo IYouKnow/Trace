@@ -1,6 +1,7 @@
 import { ThemeToggle } from "../../components/ThemeToggle";
 import { PageHeader } from "../../components/ui/PageHeader";
-import { Panel } from "../../components/ui/Panel";
+import { SettingsGroup } from "../../components/ui/SettingsGroup";
+import { SettingsRow } from "../../components/ui/SettingsRow";
 import type { Theme } from "../../lib/theme";
 
 type Props = {
@@ -13,17 +14,18 @@ export default function AppearancePage({ theme, onThemeChange }: Props) {
     <>
       <PageHeader title="Appearance" description="Match Trace to your desktop." />
 
-      <div className="flex max-w-2xl flex-col gap-4 p-6">
-        <Panel title="Theme">
-          <div className="flex flex-col gap-2">
-            <div className="max-w-[220px]">
+      <div className="flex max-w-2xl flex-col gap-6 p-6">
+        <SettingsGroup title="Theme">
+          <SettingsRow
+            plain
+            label="Color theme"
+            description="System follows your Windows theme."
+          >
+            <div className="w-[112px]">
               <ThemeToggle theme={theme} onChange={onThemeChange} />
             </div>
-            <p className="text-[12px] text-ink-faint">
-              System follows your Windows theme.
-            </p>
-          </div>
-        </Panel>
+          </SettingsRow>
+        </SettingsGroup>
       </div>
     </>
   );

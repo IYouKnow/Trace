@@ -20,8 +20,7 @@ export type SettingsSection = {
 };
 
 export const SETTINGS_SECTIONS: SettingsSection[] = [
-  { id: "recording", label: "Recording" },
-  { id: "audio", label: "Audio" },
+  { id: "capture", label: "Capture" },
   { id: "general", label: "General" },
   { id: "hotkeys", label: "Hotkeys" },
   { id: "appearance", label: "Appearance" },

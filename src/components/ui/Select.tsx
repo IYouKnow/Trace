@@ -1,25 +1,26 @@
 import type { ReactNode } from "react";
+import { cx } from "../../lib/cx";
 
 type Props = {
-  label: string;
   value: string;
   onChange: (value: string) => void;
-  hint?: string;
+  disabled?: boolean;
+  className?: string;
   children: ReactNode;
 };
 
-export function Select({ label, value, onChange, hint, children }: Props) {
+export function Select({ value, onChange, disabled, className, children }: Props) {
   return (
-    <label className="flex flex-col gap-2">
-      <span className="text-[13px] text-ink-muted">{label}</span>
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-9 cursor-pointer rounded-[var(--radius-control)] border border-line bg-elevated px-2.5 text-sm text-ink"
-      >
-        {children}
-      </select>
-      {hint && <span className="text-[12px] text-ink-faint">{hint}</span>}
-    </label>
+    <select
+      value={value}
+      disabled={disabled}
+      onChange={(event) => onChange(event.target.value)}
+      className={cx(
+        "h-8 w-[200px] cursor-pointer rounded-[6px] border border-line bg-elevated px-2 text-[13px] text-ink transition-colors hover:border-line-strong disabled:cursor-not-allowed disabled:opacity-50",
+        className,
+      )}
+    >
+      {children}
+    </select>
   );
 }

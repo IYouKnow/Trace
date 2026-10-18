@@ -1,7 +1,8 @@
 import { FolderOpen } from "lucide-react";
 import { Button } from "../../components/ui/Button";
 import { PageHeader } from "../../components/ui/PageHeader";
-import { Panel } from "../../components/ui/Panel";
+import { SettingsGroup } from "../../components/ui/SettingsGroup";
+import { SettingsRow } from "../../components/ui/SettingsRow";
 import { api } from "../../lib/api";
 
 type Props = {
@@ -13,10 +14,9 @@ export default function StoragePage({ clipsDir }: Props) {
     <>
       <PageHeader title="Storage" description="Where your saved clips live." />
 
-      <div className="flex max-w-2xl flex-col gap-4 p-6">
-        <Panel title="Clips folder">
-          <div className="flex items-center justify-between gap-4">
-            <p className="break-all text-[13px] text-ink-muted">{clipsDir ?? "—"}</p>
+      <div className="flex max-w-2xl flex-col gap-6 p-6">
+        <SettingsGroup title="Clips folder">
+          <SettingsRow plain label="Location" description={clipsDir ?? "—"}>
             <Button
               size="sm"
               disabled={!clipsDir}
@@ -25,8 +25,8 @@ export default function StoragePage({ clipsDir }: Props) {
             >
               Open folder
             </Button>
-          </div>
-        </Panel>
+          </SettingsRow>
+        </SettingsGroup>
       </div>
     </>
   );
