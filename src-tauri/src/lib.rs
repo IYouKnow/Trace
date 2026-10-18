@@ -105,6 +105,9 @@ struct Settings {
     /// Microphone endpoint id to capture, or `None` for the system default.
     #[serde(default)]
     microphone_device: Option<String>,
+    /// Monitor device name to record, or `None` for the primary display.
+    #[serde(default)]
+    monitor: Option<String>,
 }
 
 /// Serde default for settings that ship enabled.
@@ -124,6 +127,7 @@ impl Default for Settings {
             audio_source: AudioSource::default(),
             system_device: None,
             microphone_device: None,
+            monitor: None,
         }
     }
 }
@@ -147,6 +151,8 @@ struct Status {
     buffer_seconds: u32,
     fps: u32,
     bitrate: u64,
+    /// Monitor device name being recorded, or `None` for the primary display.
+    monitor: Option<String>,
     clips_dir: String,
     available_encoders: Vec<String>,
 }
@@ -262,6 +268,7 @@ impl AppState {
             buffer_seconds: settings.buffer_seconds,
             fps: settings.fps,
             bitrate: settings.bitrate,
+            monitor: settings.monitor.clone(),
             clips_dir: self.cached_clips_dir(app),
             available_encoders: self.cached_encoders(),
         }
@@ -294,6 +301,7 @@ fn start_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, Strin
                     settings.system_device.clone(),
                     settings.microphone_device.clone(),
                 ),
+                monitor: settings.monitor.clone(),
             };
 
             let started = ReplaySession::start(config, dir).map_err(|error| error.to_string())?;
@@ -445,6 +453,35 @@ async fn list_audio_devices() -> AudioDevices {
     AudioDevices {
         system: audio::list_devices(AudioTrack::System).unwrap_or_default(),
         microphone: audio::list_devices(AudioTrack::Microphone).unwrap_or_default(),
+    }
+}
+
+/// Lists the monitors available to record, marking the primary one.
+#[tauri::command]
+async fn list_monitors() -> Vec<trace_engine::monitor::MonitorInfo> {
+    trace_engine::monitor::list_monitors().unwrap_or_default()
+}
+
+/// Selects the monitor to record, restarting capture if it is already running.
+#[tauri::command]
+fn set_monitor(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    monitor: Option<String>,
+) -> Result<Status, String> {
+    let running = state.session.lock().map(|s| s.is_some()).unwrap_or(false);
+
+    {
+        let mut settings = state.settings.lock().map_err(|error| error.to_string())?;
+        settings.monitor = monitor;
+        settings::persist(&app, &settings)?;
+    }
+
+    if running {
+        stop_replay_inner(&app, &state)?;
+        start_replay_inner(&app, &state)
+    } else {
+        Ok(state.status(&app))
     }
 }
 
@@ -828,6 +865,8 @@ pub fn run() {
             set_hotkeys,
             set_hotkeys_suspended,
             list_audio_devices,
+            list_monitors,
+            set_monitor,
             start_mic_test,
             stop_mic_test,
             mic_test_status,

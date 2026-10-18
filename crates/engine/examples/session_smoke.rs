@@ -35,6 +35,7 @@ fn main() -> anyhow::Result<()> {
             system_device: std::env::var("SMOKE_SYSTEM_DEVICE").ok(),
             microphone_device: std::env::var("SMOKE_MIC_DEVICE").ok(),
         },
+        monitor: None,
     };
     println!("audio: {mode}");
 

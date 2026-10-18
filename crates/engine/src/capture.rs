@@ -125,12 +125,13 @@ impl CaptureHandle {
     }
 }
 
-/// Starts capturing the primary monitor, forwarding frames to `sink`.
+/// Starts capturing `monitor`, forwarding frames to `sink`.
 ///
 /// Dirty-region reporting is requested so a static desktop costs nothing; the
 /// OS-side update interval is only a hint, so real pacing happens in the
 /// handler. Both are optional and degrade gracefully on older Windows builds.
 pub fn start_monitor_capture(
+    monitor: Monitor,
     sink: Sender<CaptureMessage>,
     stop: Arc<AtomicBool>,
     config: CaptureConfig,
@@ -154,7 +155,6 @@ pub fn start_monitor_capture(
 
     let mut last_error = None;
     for (dirty, min_interval) in attempts {
-        let monitor = Monitor::primary()?;
         let settings = Settings::new(
             monitor,
             CursorCaptureSettings::WithCursor,

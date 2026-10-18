@@ -1,11 +1,11 @@
 import { listen } from "@tauri-apps/api/event";
 import { Film, LoaderCircle, Play, Save, Square, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { CapturePreview } from "../components/CapturePreview";
 import { ClipThumbnail } from "../components/ClipThumbnail";
+import { MonitorCard } from "../components/MonitorCard";
 import { WindowControls } from "../components/WindowControls";
 import { Banner } from "../components/ui/Banner";
-import { api, assetUrl, type Clip, type Status } from "../lib/api";
+import { api, assetUrl, type Clip, type MonitorInfo, type Status } from "../lib/api";
 import { cx } from "../lib/cx";
 
 /// Encoders that typically run on the CPU rather than a GPU block.
@@ -24,6 +24,8 @@ export default function Home({ status, pollError, onChanged }: Props) {
   const [replayBusy, setReplayBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [clips, setClips] = useState<Clip[]>([]);
+  const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
+  const [monitorBusy, setMonitorBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
   const replaying = status?.replaying ?? false;
@@ -46,6 +48,10 @@ export default function Home({ status, pollError, onChanged }: Props) {
     ? SOFTWARE_ENCODERS.includes(status.encoder)
     : false;
 
+  // The stored selection, or the primary display when none is stored.
+  const selectedId =
+    status?.monitor ?? monitors.find((m) => m.is_primary)?.id ?? monitors[0]?.id;
+
   const loadClips = useCallback(async () => {
     try {
       const all = await api.listClips();
@@ -54,6 +60,24 @@ export default function Home({ status, pollError, onChanged }: Props) {
       setClips([]);
     }
   }, []);
+
+  const loadMonitors = useCallback(async () => {
+    try {
+      setMonitors(await api.listMonitors());
+    } catch {
+      setMonitors([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadMonitors();
+  }, [loadMonitors, replaying]);
+
+  useEffect(() => {
+    const onFocus = () => loadMonitors();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadMonitors]);
 
   useEffect(() => {
     loadClips();
@@ -99,6 +123,22 @@ export default function Home({ status, pollError, onChanged }: Props) {
     }
   }
 
+  /// Switches the recorded display. While replaying this restarts capture on
+  /// the new monitor, so it can take a moment.
+  async function selectMonitor(id: string) {
+    if (id === selectedId) return;
+    setMonitorBusy(true);
+    setError(null);
+    try {
+      await api.setMonitor(id);
+      onChanged();
+    } catch (caught) {
+      setError(String(caught));
+    } finally {
+      setMonitorBusy(false);
+    }
+  }
+
   /// Moves a recent clip to the Recycle Bin; the backend then emits
   /// `clips-changed`, which reloads the list.
   async function remove(clip: Clip) {
@@ -117,7 +157,12 @@ export default function Home({ status, pollError, onChanged }: Props) {
       <div className="absolute right-1.5 top-1 z-10">
         <WindowControls />
       </div>
-      <div className="mx-auto my-auto flex w-full max-w-xl flex-col gap-5 px-6 py-8">
+      <div
+        className={cx(
+          "mx-auto my-auto flex w-full flex-col gap-5 px-6 py-8",
+          monitors.length > 1 ? "max-w-2xl" : "max-w-xl",
+        )}
+      >
         {shownError && <Banner tone="error">{shownError}</Banner>}
 
         {softwareEncoder && (
@@ -127,11 +172,27 @@ export default function Home({ status, pollError, onChanged }: Props) {
           </Banner>
         )}
 
-        <CapturePreview
-          replaying={replaying}
-          bufferSeconds={bufferSeconds}
-          recordedSeconds={recordedSeconds}
-        />
+        {monitors.length > 0 && (
+          <div
+            className={cx(
+              "grid gap-3",
+              monitors.length > 1 ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1",
+            )}
+          >
+            {monitors.map((monitor) => (
+              <MonitorCard
+                key={monitor.id}
+                monitor={monitor}
+                selected={monitor.id === selectedId}
+                replaying={replaying}
+                bufferSeconds={bufferSeconds}
+                recordedSeconds={recordedSeconds}
+                busy={monitorBusy}
+                onSelect={() => selectMonitor(monitor.id)}
+              />
+            ))}
+          </div>
+        )}
 
         <div className="flex flex-col items-center gap-2.5">
           <div className="flex items-center justify-center gap-3">

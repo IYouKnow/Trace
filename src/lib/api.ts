@@ -14,6 +14,7 @@ export type Status = {
   buffer_seconds: number;
   fps: number;
   bitrate: number;
+  monitor: string | null;
   clips_dir: string;
   available_encoders: string[];
 };
@@ -49,6 +50,15 @@ export type MicTestStatus = {
   device: string | null;
 };
 
+export type MonitorInfo = {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  index: number;
+  is_primary: boolean;
+};
+
 export type Settings = {
   auto_start: boolean;
   launch_at_login: boolean;
@@ -59,6 +69,7 @@ export type Settings = {
   audio_source: AudioSource;
   system_device: string | null;
   microphone_device: string | null;
+  monitor: string | null;
 };
 
 export type Hotkeys = {
@@ -81,6 +92,8 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
   listAudioDevices: () => invoke<AudioDevices>("list_audio_devices"),
+  listMonitors: () => invoke<MonitorInfo[]>("list_monitors"),
+  setMonitor: (monitor: string | null) => invoke<Status>("set_monitor", { monitor }),
   startMicTest: (deviceId: string | null) =>
     invoke<MicTestStatus>("start_mic_test", { deviceId }),
   stopMicTest: () => invoke<void>("stop_mic_test"),

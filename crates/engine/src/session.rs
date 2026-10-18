@@ -165,6 +165,8 @@ pub struct ReplayConfig {
     pub buffer_seconds: f64,
     /// Which audio sources to capture alongside the video.
     pub audio: AudioConfig,
+    /// Monitor device name to capture, or `None` for the primary display.
+    pub monitor: Option<String>,
 }
 
 impl Default for ReplayConfig {
@@ -175,6 +177,7 @@ impl Default for ReplayConfig {
             bitrate: 20_000_000,
             buffer_seconds: 60.0,
             audio: AudioConfig::default(),
+            monitor: None,
         }
     }
 }
@@ -277,6 +280,8 @@ impl ReplaySession {
         let worker_stats = stats.clone();
         let fps = config.fps;
         let bitrate = config.bitrate;
+        // Resolve the target display before `config` moves into the worker.
+        let monitor = crate::monitor::resolve(config.monitor.as_deref())?;
         let worker = std::thread::Builder::new()
             .name("trace-encoder".into())
             .spawn(move || {
@@ -295,6 +300,7 @@ impl ReplaySession {
             })?;
 
         let capture = capture::start_monitor_capture(
+            monitor,
             frame_tx,
             stop.clone(),
             capture::CaptureConfig { fps, bitrate },
