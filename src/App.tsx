@@ -5,7 +5,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Toaster } from "./components/ui/Toaster";
 import { UpdateBar } from "./components/UpdateBar";
 import { api, type Status } from "./lib/api";
-import type { View } from "./lib/nav";
+import { SETTINGS_SECTIONS, type SettingsTarget, type View } from "./lib/nav";
 import { initNotifications } from "./lib/notifications";
 import { useSidebarCollapsed } from "./lib/sidebar";
 import { useTheme } from "./lib/theme";
@@ -21,6 +21,8 @@ export default function App() {
   const [view, setView] = useState<View>("home");
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [settingsSection, setSettingsSection] = useState(SETTINGS_SECTIONS[0].id);
+  const [settingsTarget, setSettingsTarget] = useState<SettingsTarget | null>(null);
   const updater = useUpdater();
 
   const refresh = useCallback(async () => {
@@ -30,6 +32,11 @@ export default function App() {
     } catch (caught) {
       setError(String(caught));
     }
+  }, []);
+
+  const openSettingsSection = useCallback((id: string) => {
+    setView("settings");
+    setSettingsTarget((current) => ({ id, nonce: (current?.nonce ?? 0) + 1 }));
   }, []);
 
   useEffect(() => {
@@ -70,6 +77,8 @@ export default function App() {
           replaying={status?.replaying ?? false}
           collapsed={collapsed}
           onToggle={toggleSidebar}
+          settingsSection={settingsSection}
+          onSelectSection={openSettingsSection}
         />
       }
       bar={<UpdateBar updater={updater} />}
@@ -85,6 +94,8 @@ export default function App() {
           onThemeChange={setTheme}
           onSaved={refresh}
           updater={updater}
+          target={settingsTarget}
+          onSectionChange={setSettingsSection}
         />
       )}
       {view === "hotkeys" && <Hotkeys />}

@@ -6,9 +6,10 @@ type Props = {
   value: number;
   onChange: (value: number) => void;
   format?: (value: number) => string;
+  hint?: string;
 };
 
-export function Slider({ label, min, max, step, value, onChange, format }: Props) {
+export function Slider({ label, min, max, step, value, onChange, format, hint }: Props) {
   return (
     <label className="flex flex-col gap-2">
       <span className="text-[13px] text-ink-muted">{label}</span>
@@ -26,6 +27,7 @@ export function Slider({ label, min, max, step, value, onChange, format }: Props
           {format ? format(value) : value}
         </output>
       </div>
+      {hint && <span className="text-[12px] text-ink-faint">{hint}</span>}
     </label>
   );
 }

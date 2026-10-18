@@ -4,10 +4,11 @@ type Props = {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  hint?: string;
   children: ReactNode;
 };
 
-export function Select({ label, value, onChange, children }: Props) {
+export function Select({ label, value, onChange, hint, children }: Props) {
   return (
     <label className="flex flex-col gap-2">
       <span className="text-[13px] text-ink-muted">{label}</span>
@@ -18,6 +19,7 @@ export function Select({ label, value, onChange, children }: Props) {
       >
         {children}
       </select>
+      {hint && <span className="text-[12px] text-ink-faint">{hint}</span>}
     </label>
   );
 }

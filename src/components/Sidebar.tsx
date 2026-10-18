@@ -1,6 +1,7 @@
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { useEffect, useState } from "react";
 import { cx } from "../lib/cx";
-import { NAV, type View } from "../lib/nav";
+import { NAV, SETTINGS_SECTIONS, type View } from "../lib/nav";
 import type { Theme } from "../lib/theme";
 import { NavItem } from "./NavItem";
 import { StatusPill } from "./StatusPill";
@@ -14,6 +15,8 @@ type Props = {
   replaying: boolean;
   collapsed: boolean;
   onToggle: () => void;
+  settingsSection: string;
+  onSelectSection: (id: string) => void;
 };
 
 export function Sidebar({
@@ -24,7 +27,16 @@ export function Sidebar({
   replaying,
   collapsed,
   onToggle,
+  settingsSection,
+  onSelectSection,
 }: Props) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Reveal the section list whenever the user lands on Settings.
+  useEffect(() => {
+    if (view === "settings") setSettingsOpen(true);
+  }, [view]);
+
   return (
     <aside
       className={cx(
@@ -63,15 +75,47 @@ export function Sidebar({
         aria-label="Main"
         className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2 pt-1 pb-2"
       >
-        {NAV.map((entry) => (
-          <NavItem
-            key={entry.id}
-            entry={entry}
-            active={view === entry.id}
-            collapsed={collapsed}
-            onSelect={() => onSelect(entry.id)}
-          />
-        ))}
+        {NAV.map((entry) => {
+          const isSettings = entry.id === "settings";
+          return (
+            <div key={entry.id} className="flex flex-col gap-0.5">
+              <NavItem
+                entry={entry}
+                active={view === entry.id}
+                collapsed={collapsed}
+                onSelect={() => onSelect(entry.id)}
+                expanded={isSettings ? settingsOpen : undefined}
+                onToggle={isSettings ? () => setSettingsOpen((open) => !open) : undefined}
+              />
+
+              {isSettings && settingsOpen && !collapsed && (
+                <ul className="ml-5 flex flex-col gap-0.5 border-l border-line pl-1.5">
+                  {SETTINGS_SECTIONS.map((section) => {
+                    const active =
+                      view === "settings" && settingsSection === section.id;
+                    return (
+                      <li key={section.id}>
+                        <button
+                          type="button"
+                          onClick={() => onSelectSection(section.id)}
+                          aria-current={active ? "true" : undefined}
+                          className={cx(
+                            "flex h-7 w-full cursor-pointer items-center rounded-[6px] px-2.5 text-[13px] transition-colors duration-150",
+                            active
+                              ? "font-medium text-ink"
+                              : "text-ink-faint hover:bg-elevated/60 hover:text-ink",
+                          )}
+                        >
+                          <span className="truncate">{section.label}</span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          );
+        })}
       </nav>
 
       <div className="flex flex-col gap-2 border-t border-line p-2">
