@@ -50,11 +50,38 @@ const SEEN_KEY = "trace.whatsnew.seen";
 // rather than a first install.
 const PRIOR_KEYS = ["trace.theme", "trace.sidebar.collapsed"];
 
+/// Compares dotted versions; a missing or non-numeric part counts as zero.
+function compareVersions(a: string, b: string): number {
+  const left = a.replace(/^v/, "").split(".");
+  const right = b.replace(/^v/, "").split(".");
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i++) {
+    const diff = (Number(left[i]) || 0) - (Number(right[i]) || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 /// Notes for the running version, or null when it isn't a tracked release.
 export function releaseFor(version: string | null): Release | null {
   if (!version) return null;
   const normalized = version.replace(/^v/, "");
   return RELEASES.find((release) => release.version === normalized) ?? null;
+}
+
+/// Releases newer than `after`, up to and including `current`, newest first.
+/// `after` is the last version the user saw; null means "up to and including".
+export function releasesSince(after: string | null, current: string): Release[] {
+  return RELEASES.filter((release) => {
+    if (compareVersions(release.version, current) > 0) return false;
+    if (after !== null && compareVersions(release.version, after) <= 0) return false;
+    return true;
+  });
+}
+
+/// Releases older than `version`, newest first.
+export function olderReleases(version: string): Release[] {
+  return RELEASES.filter((release) => compareVersions(release.version, version) < 0);
 }
 
 function readSeen(): string | null {
@@ -82,15 +109,22 @@ function hasRunBefore(): boolean {
 }
 
 export type WhatsNew = {
+  /** Notes for the running version, if it shipped user-facing changes. */
   release: Release | null;
+  /** Older releases, newest first, for the history in Settings. */
+  previous: Release[];
+  /** Releases to announce: everything since the last version the user saw. */
+  pending: Release[];
   open: boolean;
   close: () => void;
 };
 
-/// Resolves the notes for the version this install just moved to, opening them
-/// exactly once per version.
+/// Resolves the notes for the version this install just moved to, opening
+/// everything the user missed exactly once.
 export function useWhatsNew(): WhatsNew {
   const [release, setRelease] = useState<Release | null>(null);
+  const [previous, setPrevious] = useState<Release[]>([]);
+  const [pending, setPending] = useState<Release[]>([]);
   const [open, setOpen] = useState(false);
   // Sampled during the first render, before any effect writes the prior keys,
   // so a brand-new install isn't mistaken for an upgrade.
@@ -102,8 +136,8 @@ export function useWhatsNew(): WhatsNew {
       .getVersion()
       .then((version) => {
         if (cancelled) return;
-        const entry = releaseFor(version);
-        setRelease(entry);
+        setRelease(releaseFor(version));
+        setPrevious(olderReleases(version));
 
         const seen = readSeen();
         // First install ever: adopt the current version silently.
@@ -111,10 +145,14 @@ export function useWhatsNew(): WhatsNew {
           writeSeen(version);
           return;
         }
-        if (seen === version) return;
 
+        // Skipped versions are announced too; a normal update yields just one.
+        const missed = releasesSince(seen, version);
         writeSeen(version);
-        if (entry) setOpen(true);
+        if (missed.length > 0) {
+          setPending(missed);
+          setOpen(true);
+        }
       })
       .catch(() => {});
     return () => {
@@ -124,5 +162,5 @@ export function useWhatsNew(): WhatsNew {
 
   const close = useCallback(() => setOpen(false), []);
 
-  return { release, open, close };
+  return { release, previous, pending, open, close };
 }

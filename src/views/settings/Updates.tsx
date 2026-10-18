@@ -1,4 +1,4 @@
-import { Download, RefreshCw } from "lucide-react";
+import { ChevronDown, Download, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Banner } from "../../components/ui/Banner";
 import { Button } from "../../components/ui/Button";
@@ -7,6 +7,7 @@ import { SettingsGroup } from "../../components/ui/SettingsGroup";
 import { SettingsRow } from "../../components/ui/SettingsRow";
 import { WhatsNew } from "../../components/WhatsNew";
 import { api } from "../../lib/api";
+import { cx } from "../../lib/cx";
 import type { Updater } from "../../lib/updater";
 import type { WhatsNew as WhatsNewState } from "../../lib/whatsnew";
 
@@ -17,6 +18,7 @@ type Props = {
 
 export default function UpdatesPage({ updater, whatsNew }: Props) {
   const [version, setVersion] = useState<string | null>(null);
+  const [showPrevious, setShowPrevious] = useState(false);
 
   useEffect(() => {
     api
@@ -78,9 +80,34 @@ export default function UpdatesPage({ updater, whatsNew }: Props) {
         {whatsNew.release && (
           <SettingsGroup title="What's new">
             <div className="px-4 py-3.5">
-              <WhatsNew release={whatsNew.release} />
+              <WhatsNew releases={[whatsNew.release]} />
             </div>
           </SettingsGroup>
+        )}
+
+        {whatsNew.previous.length > 0 && (
+          <section className="flex flex-col gap-2">
+            <button
+              type="button"
+              onClick={() => setShowPrevious((open) => !open)}
+              aria-expanded={showPrevious}
+              className="flex w-fit cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] px-1 text-[13px] font-semibold text-ink"
+            >
+              <ChevronDown
+                aria-hidden="true"
+                className={cx(
+                  "size-3.5 transition-transform duration-150",
+                  showPrevious && "rotate-180",
+                )}
+              />
+              Previous releases
+            </button>
+            {showPrevious && (
+              <div className="rounded-[var(--radius-panel)] border border-line bg-surface px-4 py-3.5">
+                <WhatsNew releases={whatsNew.previous} />
+              </div>
+            )}
+          </section>
         )}
       </div>
     </>

@@ -101,8 +101,8 @@ export default function App() {
           />
         )}
         <Toaster />
-        {whatsNew.open && whatsNew.release && (
-          <WhatsNewDialog release={whatsNew.release} onClose={whatsNew.close} />
+        {whatsNew.open && whatsNew.pending.length > 0 && (
+          <WhatsNewDialog releases={whatsNew.pending} onClose={whatsNew.close} />
         )}
       </AppShell>
     </SettingsProvider>
