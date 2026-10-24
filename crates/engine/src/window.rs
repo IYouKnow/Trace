@@ -6,6 +6,11 @@
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
+use windows::Win32::Foundation::HWND;
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
+use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
 use windows_capture::window::Window;
 
 use crate::icon;
@@ -83,6 +88,42 @@ pub fn resolve(process: Option<&str>, title: Option<&str>) -> Result<Window> {
         .max_by_key(|window| window.width().unwrap_or(0) as i64 * window.height().unwrap_or(0) as i64)
         .copied()
         .ok_or_else(|| anyhow!("the selected window is not available"))
+}
+
+/// Whether `window` belongs to a Chromium/Electron app.
+///
+/// Those apps draw through a GPU composition path that a window capture cannot
+/// read while the window is in the background (the surface reads back blank), so
+/// they are recorded from the screen instead. The window class is stable across
+/// Chromium and every Electron app built on it (Discord, Slack, VS Code, …).
+pub fn is_composited_app(window: &Window) -> bool {
+    let mut buffer = [0u16; 128];
+    let length = unsafe { GetClassNameW(HWND(window.as_raw_hwnd()), &mut buffer) };
+    if length <= 0 {
+        return false;
+    }
+    String::from_utf16_lossy(&buffer[..length as usize]).starts_with("Chrome_WidgetWin")
+}
+
+/// Screen-space top-left corner of the display showing `window`.
+///
+/// Capture frames are relative to their display, so this is what turns a
+/// window's screen coordinates into frame coordinates.
+pub fn monitor_origin(window: &Window) -> Option<(i32, i32)> {
+    unsafe {
+        let monitor = MonitorFromWindow(HWND(window.as_raw_hwnd()), MONITOR_DEFAULTTONEAREST);
+        if monitor.is_invalid() {
+            return None;
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        Some((info.rcMonitor.left, info.rcMonitor.top))
+    }
 }
 
 fn describe(window: Window, foreground: Option<Window>, own_pid: u32) -> Option<WindowInfo> {

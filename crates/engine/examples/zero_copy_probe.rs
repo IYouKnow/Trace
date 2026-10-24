@@ -95,7 +95,13 @@ fn main() -> anyhow::Result<()> {
 
     for index in 0..5 {
         let mut frame = hw_frames.get_frame()?;
-        unsafe { processor.convert(&bgra, frame.slice_index())? };
+        let whole = windows::Win32::Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: WIDTH as i32,
+            bottom: HEIGHT as i32,
+        };
+        unsafe { processor.convert(&bgra, frame.slice_index(), whole)? };
         let pts = index as i64 * 1_000_000 / FPS as i64;
         frame.set_pts(pts);
         let packets = encoder.encode_av_frame(frame.into_raw(), pts)?;

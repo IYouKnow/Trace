@@ -18,8 +18,7 @@ use windows::core::Interface;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_TEX2D_ARRAY_VPOV, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, D3D11_VIDEO_COLOR, D3D11_VIDEO_COLOR_0, D3D11_VIDEO_COLOR_YCbCrA,
-    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
     D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
@@ -28,7 +27,9 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
     ID3D11VideoProcessorOutputView,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
 };
@@ -436,7 +437,7 @@ impl Drop for HwFrame {
 /// Converts a captured BGRA texture into one slice of the NV12 pool on the GPU.
 ///
 /// Input and output sizes may differ: the source is scaled to fit the fixed
-/// output canvas, aspect ratio preserved, with the remainder filled black. This
+/// output canvas, aspect ratio preserved, with the remainder painted black. This
 /// is what keeps a resized window from changing the encoder's frame size.
 pub struct VideoProcessor {
     device: ID3D11VideoDevice,
@@ -444,10 +445,16 @@ pub struct VideoProcessor {
     processor: ID3D11VideoProcessor,
     enumerator: ID3D11VideoProcessorEnumerator,
     output_views: Vec<ID3D11VideoProcessorOutputView>,
+    /// Black input-sized texture used to paint the letterbox area. Its size must
+    /// match the enumerator's input size for the input view to be valid.
+    black_source: ID3D11Texture2D,
     input_width: u32,
     input_height: u32,
     width: u32,
     height: u32,
+    /// Where the source is drawn inside the canvas (`fitted`), and the whole
+    /// canvas (`full`).
+    full: RECT,
 }
 
 impl VideoProcessor {
@@ -477,14 +484,16 @@ impl VideoProcessor {
             .cast()
             .map_err(|e| anyhow!("device context has no ID3D11VideoContext: {e}"))?;
 
+        let input_width = input_width.max(1);
+        let input_height = input_height.max(1);
         let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
             InputFrameRate: DXGI_RATIONAL {
                 Numerator: fps.max(1),
                 Denominator: 1,
             },
-            InputWidth: input_width.max(1),
-            InputHeight: input_height.max(1),
+            InputWidth: input_width,
+            InputHeight: input_height,
             OutputFrameRate: DXGI_RATIONAL {
                 Numerator: fps.max(1),
                 Denominator: 1,
@@ -557,54 +566,56 @@ impl VideoProcessor {
             output_views.push(single.ok_or_else(|| anyhow!("no output view returned"))?);
         }
 
+        // The full-canvas destination rectangle, used to paint the letterbox.
+        let full = RECT {
+            left: 0,
+            top: 0,
+            right: width as i32,
+            bottom: height as i32,
+        };
+
+        // A fresh D3D11 texture reads back as zeros, which is black.
+        let (black_source, _) = create_texture(
+            gpu,
+            input_width,
+            input_height,
+            1,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            0,
+        )?;
+
         let processor = Self {
             device,
             context,
             processor,
             enumerator,
             output_views,
-            input_width: input_width.max(1),
-            input_height: input_height.max(1),
+            black_source,
+            input_width,
+            input_height,
             width,
             height,
+            full,
         };
-        processor.apply_scaling();
         Ok(processor)
     }
 
-    /// Places the (scaled) source inside the output canvas, filling the rest black.
-    ///
-    /// The destination rectangle is the largest centered rectangle with the
-    /// source's aspect ratio; the surrounding letterbox is the output background
-    /// color, so a window resize never distorts or crops the content.
-    fn apply_scaling(&self) {
-        let source = RECT {
+    /// The whole input texture, in input coordinates.
+    fn full_source(&self) -> RECT {
+        RECT {
             left: 0,
             top: 0,
             right: self.input_width as i32,
             bottom: self.input_height as i32,
-        };
-        let dest = fit_rect(self.input_width, self.input_height, self.width, self.height);
-        // Limited-range black: luma 16, neutral chroma, so padded regions decode
-        // as black rather than green.
-        let background = D3D11_VIDEO_COLOR {
-            Anonymous: D3D11_VIDEO_COLOR_0 {
-                YCbCr: D3D11_VIDEO_COLOR_YCbCrA {
-                    Y: 0.0625,
-                    Cb: 0.5,
-                    Cr: 0.5,
-                    A: 1.0,
-                },
-            },
-        };
+        }
+    }
 
+    fn set_rects(&self, source: RECT, dest: RECT) {
         unsafe {
             self.context
                 .VideoProcessorSetStreamSourceRect(&self.processor, 0, true, Some(&source));
             self.context
                 .VideoProcessorSetStreamDestRect(&self.processor, 0, true, Some(&dest));
-            self.context
-                .VideoProcessorSetOutputBackgroundColor(&self.processor, false, &background);
         }
     }
 
@@ -616,13 +627,50 @@ impl VideoProcessor {
         self.height
     }
 
-    /// Blits `source` (BGRA) into NV12 slice `slice`.
-    pub unsafe fn convert(&self, source: &ID3D11Texture2D, slice: usize) -> Result<()> {
+    /// Blits `content` — a region of `source` — into NV12 slice `slice`, scaled
+    /// to fit the canvas.
+    ///
+    /// `content` selects what to use from the input: the whole frame for a display,
+    /// or the app's rectangle when recording an app from the screen. The output is
+    /// the largest centered rectangle with the content's aspect ratio, so a resized
+    /// window is never distorted. The processor leaves everything outside that
+    /// rectangle untouched, and an untouched NV12 surface has zero chroma (which
+    /// decodes green), so the letterbox area is painted black first.
+    pub unsafe fn convert(&self, source: &ID3D11Texture2D, slice: usize, content: RECT) -> Result<()> {
         let output = self
             .output_views
             .get(slice)
             .ok_or_else(|| anyhow!("slice {slice} outside pool"))?;
 
+        let content_width = (content.right - content.left).max(0) as u32;
+        let content_height = (content.bottom - content.top).max(0) as u32;
+        let fitted = fit_rect(content_width, content_height, self.width, self.height);
+
+        if fitted != self.full {
+            self.set_rects(self.full_source(), self.full);
+            self.blit(&self.black_source, output)?;
+        }
+        self.set_rects(content, fitted);
+        self.blit(source, output)
+    }
+
+    /// Paints the whole canvas black, leaving the encoder a frame in which the
+    /// captured content is not being drawn (a minimized window).
+    pub unsafe fn convert_black(&self, slice: usize) -> Result<()> {
+        let output = self
+            .output_views
+            .get(slice)
+            .ok_or_else(|| anyhow!("slice {slice} outside pool"))?;
+        self.set_rects(self.full_source(), self.full);
+        self.blit(&self.black_source, output)
+    }
+
+    /// Blits one BGRA texture into `output` using the processor's current rects.
+    unsafe fn blit(
+        &self,
+        source: &ID3D11Texture2D,
+        output: &ID3D11VideoProcessorOutputView,
+    ) -> Result<()> {
         let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
             FourCC: 0,
             ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,

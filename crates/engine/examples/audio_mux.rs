@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
     for index in 0..FRAMES {
         fill_video(&mut frame, index);
         let pts = index as i64 * 1_000_000 / FPS as i64;
-        for packet in video_encoder.encode_bgra(&frame, row, WIDTH, HEIGHT, pts)? {
+        for packet in video_encoder.encode_bgra(&frame, row, 0, 0, WIDTH, HEIGHT, pts)? {
             video_ring.push(packet);
         }
     }

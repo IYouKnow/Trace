@@ -5,6 +5,7 @@
 //! encoder as a hardware frame, so nothing full-frame crosses the CPU. On
 //! machines without a usable GPU path, the raw BGRA buffer is forwarded instead.
 
+use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,9 +13,12 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use ffmpeg_next::ffi;
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, ID3D11Device, ID3D11DeviceContext,
 };
+use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsIconic};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::d3d11::StagingTexture;
 use windows_capture::encoder::ImageFormat;
@@ -90,10 +94,15 @@ pub enum CapturedData {
     /// Downloaded NV12 frame for a software encoder.
     Nv12(Nv12Frame),
     /// Raw BGRA pixels (fallback path), row padding preserved.
+    ///
+    /// Shared so a synthesized (black) frame can be handed over without copying a
+    /// full frame buffer every time. `x`/`y` select the region to use within the
+    /// buffer (non-zero when an app is recorded from the screen).
     Bgra {
-        data: Vec<u8>,
+        data: Arc<[u8]>,
         pitch: usize,
-        /// Size of the captured source, which is scaled to the canvas by the encoder.
+        x: u32,
+        y: u32,
         width: u32,
         height: u32,
     },
@@ -120,6 +129,29 @@ pub struct CaptureConfig {
     pub bitrate: u64,
 }
 
+/// A region of the captured display that follows a window's client area.
+///
+/// Used for apps whose pixels window capture cannot read while they are in the
+/// background (Chromium/Electron such as Discord): the composited screen still
+/// shows them, so the display is captured and cropped to the app instead.
+#[derive(Debug, Clone, Copy)]
+pub struct CropTarget {
+    /// Raw handle of the window to follow (an integer so the capture stays `Send`).
+    pub window: usize,
+    /// Where the captured display starts on the desktop, in screen pixels.
+    pub monitor_x: i32,
+    pub monitor_y: i32,
+}
+
+/// What the handler needs to know beyond the captured item itself.
+#[derive(Debug, Clone, Copy)]
+struct Focus {
+    /// The window being recorded, if any: drives the minimized check and cropping.
+    window: Option<usize>,
+    /// Region of the frame to use, when recording an app from the screen.
+    crop: Option<CropTarget>,
+}
+
 /// Handle to a running capture session.
 pub struct CaptureHandle {
     control: CaptureControl<FrameForwarder, BoxError>,
@@ -141,10 +173,21 @@ pub fn start_monitor_capture(
     stats: Arc<SessionStats>,
     origin: Instant,
 ) -> anyhow::Result<CaptureHandle> {
-    start_capture(monitor, sink, stop, config, stats, origin)
+    start_capture(
+        monitor,
+        Focus {
+            window: None,
+            crop: None,
+        },
+        sink,
+        stop,
+        config,
+        stats,
+        origin,
+    )
 }
 
-/// Starts capturing a single `window`, forwarding frames to `sink`.
+/// Starts capturing a single `window` directly, forwarding frames to `sink`.
 pub fn start_window_capture(
     window: Window,
     sink: Sender<CaptureMessage>,
@@ -153,7 +196,46 @@ pub fn start_window_capture(
     stats: Arc<SessionStats>,
     origin: Instant,
 ) -> anyhow::Result<CaptureHandle> {
-    start_capture(window, sink, stop, config, stats, origin)
+    start_capture(
+        window,
+        Focus {
+            window: Some(window.as_raw_hwnd() as usize),
+            crop: None,
+        },
+        sink,
+        stop,
+        config,
+        stats,
+        origin,
+    )
+}
+
+/// Starts capturing `monitor`, cropped to `crop`'s window client area.
+///
+/// This is the fallback for apps that do not draw into their own surface while
+/// they are in the background: the display is captured and each frame is cropped
+/// to wherever the app currently is, so the recording follows it around.
+pub fn start_area_capture(
+    monitor: Monitor,
+    crop: CropTarget,
+    sink: Sender<CaptureMessage>,
+    stop: Arc<AtomicBool>,
+    config: CaptureConfig,
+    stats: Arc<SessionStats>,
+    origin: Instant,
+) -> anyhow::Result<CaptureHandle> {
+    start_capture(
+        monitor,
+        Focus {
+            window: Some(crop.window),
+            crop: Some(crop),
+        },
+        sink,
+        stop,
+        config,
+        stats,
+        origin,
+    )
 }
 
 /// Starts a capture on `item` (a monitor or a window).
@@ -161,8 +243,14 @@ pub fn start_window_capture(
 /// Dirty-region reporting is requested so a static screen costs nothing; the
 /// OS-side update interval is only a hint, so real pacing happens in the
 /// handler. Both are optional and degrade gracefully on older Windows builds.
+///
+/// For a window, the focus also drives a watchdog: a minimized window stops
+/// painting, so without help the replay buffer would keep the last visible frame
+/// and a saved clip would show stale content. The watchdog feeds black frames so
+/// the timeline keeps advancing and the clip shows the window as it is — blank.
 fn start_capture<T>(
     item: T,
+    focus: Focus,
     sink: Sender<CaptureMessage>,
     stop: Arc<AtomicBool>,
     config: CaptureConfig,
@@ -197,16 +285,55 @@ where
             min_interval,
             dirty,
             ColorFormat::Bgra8,
-            (sink.clone(), stop.clone(), config, stats.clone(), origin),
+            (
+                sink.clone(),
+                stop.clone(),
+                config,
+                stats.clone(),
+                origin,
+                focus,
+            ),
         );
 
         match FrameForwarder::start_free_threaded(settings) {
-            Ok(control) => return Ok(CaptureHandle { control }),
+            Ok(control) => {
+                if focus.window.is_some() {
+                    spawn_blank_frame_watchdog(&control, interval);
+                }
+                return Ok(CaptureHandle { control });
+            }
             Err(error) => last_error = Some(anyhow::anyhow!("{error}")),
         }
     }
 
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("capture could not be started")))
+}
+
+/// Periodically asks the handler to feed a black frame while its window is
+/// minimized. The handler is only callable through the capture control, which is
+/// how a callback-driven capture gets a clock of its own.
+fn spawn_blank_frame_watchdog(control: &CaptureControl<FrameForwarder, BoxError>, interval: Duration) {
+    let callback = control.callback();
+    let halt = control.halt_handle();
+
+    let spawned = std::thread::Builder::new()
+        .name("trace-window-idle".into())
+        .spawn(move || {
+            while !halt.load(Ordering::Relaxed) {
+                std::thread::sleep(interval);
+                if halt.load(Ordering::Relaxed) {
+                    break;
+                }
+                let mut handler = callback.lock();
+                if let Err(error) = handler.emit_black_if_minimized() {
+                    report_frame_error(&error);
+                }
+            }
+        });
+
+    if let Err(error) = spawned {
+        eprintln!("failed to start the minimized-window watchdog: {error}");
+    }
 }
 
 /// Forwards each changed frame to the encoder thread.
@@ -220,6 +347,11 @@ struct FrameForwarder {
     interval: Duration,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
+    /// Raw handle of the captured window (when the target is a window) and the
+    /// region of the frame to use (when recording an app from the screen).
+    focus: Focus,
+    /// Cached black canvas-sized BGRA buffer, for the CPU fallback path.
+    blank_bgra: Option<Arc<[u8]>>,
     /// Cached CPU readback texture for the fallback path (avoids allocating a
     /// staging texture every frame).
     readback: Option<StagingTexture>,
@@ -249,13 +381,14 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
         CaptureConfig,
         Arc<SessionStats>,
         Instant,
+        Focus,
     );
     type Error = BoxError;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         // Capture must never outrank the foreground; run below normal priority.
         hw::set_current_thread_below_normal();
-        let (sink, stop, config, stats, origin) = ctx.flags;
+        let (sink, stop, config, stats, origin, focus) = ctx.flags;
         Ok(Self {
             sink,
             stop,
@@ -265,6 +398,8 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
             interval: Duration::from_micros(1_000_000 / config.fps.max(1) as u64),
             device: ctx.device,
             context: ctx.device_context,
+            focus,
+            blank_bgra: None,
             readback: None,
             pipeline: None,
             last_emit: None,
@@ -303,8 +438,24 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
 
         let timestamp_micros = self.origin.elapsed().as_micros() as i64;
 
+        // What to use from this frame: all of it, or the app's client area
+        // (which moves with the window, so it is recomputed every frame).
+        let Some(content) = self.content_rect(frame.width(), frame.height()) else {
+            self.stats.record_idle();
+            return Ok(());
+        };
+
         if self.pipeline.is_none() {
-            self.pipeline = Some(build_pipeline(&self.device, &self.context, self.config, frame)?);
+            let content_width = (content.right - content.left) as u32;
+            let content_height = (content.bottom - content.top) as u32;
+            self.pipeline = Some(build_pipeline(
+                &self.device,
+                &self.context,
+                self.config,
+                content_width,
+                content_height,
+                frame,
+            )?);
             let pipeline = self.pipeline.as_ref().unwrap();
             if self
                 .sink
@@ -335,6 +486,7 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
             &mut self.readback,
             frame,
             timestamp_micros,
+            content,
         ) {
             Ok(data) => data,
             Err(error) => {
@@ -378,12 +530,16 @@ fn build_pipeline(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     config: CaptureConfig,
+    content_width: u32,
+    content_height: u32,
     frame: &Frame<'_>,
 ) -> Result<Pipeline, BoxError> {
-    // The first frame fixes the canvas every later frame is scaled onto. NV12 and
-    // H.264 need even dimensions, and a resized window can be odd, so round down.
-    let width = even(frame.width());
-    let height = even(frame.height());
+    // The content of the first frame fixes the canvas every later frame is scaled
+    // onto. NV12 and H.264 need even dimensions, and a resized window can be odd,
+    // so round down.
+    let width = even(content_width);
+    let height = even(content_height);
+    // The input texture itself is the whole captured frame (a display).
     let input_width = frame.width();
     let input_height = frame.height();
 
@@ -560,6 +716,9 @@ fn readback_bgra(
 /// Converts one captured frame into the pixel payload the encoder consumes,
 /// following the pipeline chosen at startup.
 ///
+/// `content` is the region of the frame to use: all of it for a display, or the
+/// app's client area when an app is recorded from the screen.
+///
 /// When the source has been resized (a window was resized or maximised) the GPU
 /// processor is rebuilt for the new input size while the NV12 canvas — and so the
 /// encoder's frame pool — stays put.
@@ -570,13 +729,14 @@ fn build_frame_data(
     readback: &mut Option<StagingTexture>,
     frame: &Frame<'_>,
     timestamp_micros: i64,
+    content: RECT,
 ) -> Result<CapturedData, BoxError> {
     if pipeline.path != CapturePath::CpuFallback {
         pipeline.sync_source_size(frame)?;
     }
 
-    let source_width = frame.width();
-    let source_height = frame.height();
+    let content_width = (content.right - content.left) as u32;
+    let content_height = (content.bottom - content.top) as u32;
 
     Ok(match pipeline.path {
         CapturePath::ZeroCopy => {
@@ -584,7 +744,7 @@ fn build_frame_data(
             let processor = pipeline.processor.as_ref().unwrap();
             let mut hw_frame = hw_frames.get_frame()?;
             unsafe {
-                processor.convert(frame.as_raw_texture(), hw_frame.slice_index())?;
+                processor.convert(frame.as_raw_texture(), hw_frame.slice_index(), content)?;
             }
             // Submit the blit before the encoder picks the texture up.
             if let Some(gpu) = pipeline.gpu.as_ref() {
@@ -598,7 +758,7 @@ fn build_frame_data(
             let processor = pipeline.processor.as_ref().unwrap();
             let hw_frame = hw_frames.get_frame()?;
             unsafe {
-                processor.convert(frame.as_raw_texture(), hw_frame.slice_index())?;
+                processor.convert(frame.as_raw_texture(), hw_frame.slice_index(), content)?;
             }
             let cpu = hw_frame.download_nv12()?;
             unsafe {
@@ -609,13 +769,158 @@ fn build_frame_data(
         CapturePath::CpuFallback => {
             let (data, pitch) = readback_bgra(device, context, readback, frame)?;
             CapturedData::Bgra {
-                data,
+                data: Arc::from(data),
                 pitch,
-                width: source_width,
-                height: source_height,
+                x: content.left as u32,
+                y: content.top as u32,
+                width: content_width,
+                height: content_height,
             }
         }
     })
+}
+
+impl FrameForwarder {
+    /// The region of the captured frame to use.
+    ///
+    /// A display uses the whole frame. An app recorded from the screen uses its
+    /// client area, converted from screen coordinates to frame coordinates — the
+    /// app can be moved and resized, so this is recomputed for every frame.
+    ///
+    /// Returns `None` when none of the app overlaps the captured display (it was
+    /// minimized, or moved to another monitor), so the frame is skipped.
+    fn content_rect(&self, frame_width: u32, frame_height: u32) -> Option<RECT> {
+        let whole = RECT {
+            left: 0,
+            top: 0,
+            right: frame_width as i32,
+            bottom: frame_height as i32,
+        };
+        let Some(crop) = self.focus.crop else {
+            return Some(whole);
+        };
+
+        let window = HWND(crop.window as *mut c_void);
+        let mut client = RECT::default();
+        let mut corner = POINT::default();
+        unsafe {
+            if GetClientRect(window, &mut client).is_err() {
+                return None;
+            }
+            if !ClientToScreen(window, &mut corner).as_bool() {
+                return None;
+            }
+        }
+
+        let left = corner.x - crop.monitor_x;
+        let top = corner.y - crop.monitor_y;
+        let rect = RECT {
+            left: left.max(whole.left),
+            top: top.max(whole.top),
+            right: (left + (client.right - client.left)).min(whole.right),
+            bottom: (top + (client.bottom - client.top)).min(whole.bottom),
+        };
+
+        // A couple of pixels is not a picture; treat it as nothing to record.
+        if rect.right - rect.left < 2 || rect.bottom - rect.top < 2 {
+            return None;
+        }
+        Some(rect)
+    }
+
+    /// Feeds a black frame while the captured window is minimized.
+    ///
+    /// A minimized window paints nothing, so no frames arrive and the replay
+    /// buffer keeps the last visible frame — a saved clip would then show stale
+    /// content instead of the window's real (blank) state. Feeding black frames
+    /// keeps the timeline advancing so the clip shows black for that period.
+    ///
+    /// Called from the watchdog thread, which shares this handler with the
+    /// capture thread, so the two never run at once.
+    fn emit_black_if_minimized(&mut self) -> Result<(), BoxError> {
+        let Some(handle) = self.focus.window else {
+            return Ok(());
+        };
+        if self.stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        if !unsafe { IsIconic(HWND(handle as *mut c_void)) }.as_bool() {
+            return Ok(());
+        }
+
+        // Keep to the target frame rate, so the clip stays evenly paced.
+        let now = Instant::now();
+        if let Some(last) = self.last_emit {
+            if now.duration_since(last) < self.interval {
+                return Ok(());
+            }
+        }
+        self.last_emit = Some(now);
+
+        let timestamp_micros = self.origin.elapsed().as_micros() as i64;
+
+        // Before the first frame there is no canvas to fill.
+        let Some(pipeline) = self.pipeline.as_mut() else {
+            return Ok(());
+        };
+        let (canvas_width, canvas_height) = (pipeline.width, pipeline.height);
+
+        let data = match pipeline.path {
+            CapturePath::ZeroCopy => {
+                let hw_frames = pipeline.hw_frames.as_ref().unwrap();
+                let processor = pipeline.processor.as_ref().unwrap();
+                let mut hw_frame = hw_frames.get_frame()?;
+                unsafe {
+                    processor.convert_black(hw_frame.slice_index())?;
+                }
+                if let Some(gpu) = pipeline.gpu.as_ref() {
+                    let _ = unsafe { gpu.context.Flush() };
+                }
+                hw_frame.set_pts(timestamp_micros);
+                CapturedData::Hw(hw_frame)
+            }
+            CapturePath::GpuDownload => {
+                let hw_frames = pipeline.hw_frames.as_ref().unwrap();
+                let processor = pipeline.processor.as_ref().unwrap();
+                let hw_frame = hw_frames.get_frame()?;
+                unsafe {
+                    processor.convert_black(hw_frame.slice_index())?;
+                }
+                let cpu = hw_frame.download_nv12()?;
+                unsafe {
+                    (*cpu).pts = timestamp_micros;
+                }
+                CapturedData::Nv12(Nv12Frame(cpu))
+            }
+            CapturePath::CpuFallback => {
+                let pitch = canvas_width as usize * 4;
+                let blank = self
+                    .blank_bgra
+                    .get_or_insert_with(|| vec![0u8; pitch * canvas_height as usize].into());
+                CapturedData::Bgra {
+                    data: blank.clone(),
+                    pitch,
+                    x: 0,
+                    y: 0,
+                    width: canvas_width,
+                    height: canvas_height,
+                }
+            }
+        };
+
+        match self.sink.try_send(CaptureMessage::Frame(CapturedFrame {
+            data,
+            width: canvas_width,
+            height: canvas_height,
+            timestamp_micros,
+        })) {
+            Ok(()) => {}
+            Err(crossbeam_channel::TrySendError::Full(_)) => self.stats.record_dropped(),
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
+        }
+
+        Ok(())
+    }
 }
 
 impl Pipeline {

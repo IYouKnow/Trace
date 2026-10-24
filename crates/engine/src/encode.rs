@@ -344,13 +344,20 @@ impl VideoEncoder {
 
     /// Encodes one BGRA frame at `pts` microseconds (CPU fallback path).
     ///
-    /// The captured source may be a different size than the encoder's fixed canvas
-    /// — a window that was resized or maximised. It is scaled to fit the canvas and
+    /// `bgra` holds a whole captured frame; the region at `origin_x`/`origin_y`
+    /// sized `source_width`x`source_height` is the content to use (the app's area
+    /// when recording from the screen, otherwise the whole frame).
+    ///
+    /// The content may be a different size than the encoder's fixed canvas — a
+    /// window that was resized or maximised. It is scaled to fit the canvas and
     /// letterboxed (or padded) with black, so the encoder only ever sees one size.
+    #[allow(clippy::too_many_arguments)]
     pub fn encode_bgra(
         &mut self,
         bgra: &[u8],
         pitch: usize,
+        origin_x: u32,
+        origin_y: u32,
         source_width: u32,
         source_height: u32,
         pts: i64,
@@ -359,22 +366,31 @@ impl VideoEncoder {
 
         let row = source_width as usize * 4;
         anyhow::ensure!(pitch >= row, "row pitch {pitch} smaller than row {row}");
+        let offset = origin_y as usize * pitch + origin_x as usize * 4;
         let needed = (source_height.max(1) as usize - 1)
             .checked_mul(pitch)
-            .map(|offset| offset + row)
-            .unwrap_or(0);
+            .and_then(|rest| rest.checked_add(row))
+            .and_then(|end| end.checked_add(offset))
+            .unwrap_or(usize::MAX);
         anyhow::ensure!(
             bgra.len() >= needed,
             "frame buffer too small: {} < {needed}",
             bgra.len()
         );
 
-        // Stage the captured rows into a BGRA frame of the source size.
+        // Stage the captured rows into a BGRA frame of the content size.
         let mut source = match self.source_frame.take() {
             Some(frame) if frame.width() == source_width && frame.height() == source_height => frame,
             _ => VideoFrame::new(Pixel::BGRA, source_width, source_height),
         };
-        copy_rows(&mut source, bgra, pitch, row, source_height as usize);
+        copy_rows(
+            &mut source,
+            bgra,
+            pitch,
+            row,
+            source_height as usize,
+            offset,
+        );
 
         if source_width == self.width && source_height == self.height {
             // No resize: hand the source straight to the conversion stage.
@@ -485,20 +501,27 @@ impl VideoEncoder {
     }
 }
 
-/// Copies BGRA rows from a padded source buffer into a frame (padding preserved).
-fn copy_rows(frame: &mut VideoFrame, bgra: &[u8], pitch: usize, row: usize, height: usize) {
+/// Copies BGRA rows from a padded buffer into a frame, starting at byte `offset`.
+fn copy_rows(
+    frame: &mut VideoFrame,
+    bgra: &[u8],
+    pitch: usize,
+    row: usize,
+    height: usize,
+    offset: usize,
+) {
     let stride = frame.stride(0);
     if pitch == row && stride == row {
         // No padding on either side: one copy is enough.
         let len = row * height;
-        frame.data_mut(0)[..len].copy_from_slice(&bgra[..len]);
+        frame.data_mut(0)[..len].copy_from_slice(&bgra[offset..offset + len]);
         return;
     }
     let dest = frame.data_mut(0);
     for y in 0..height {
-        let from = &bgra[y * pitch..y * pitch + row];
-        let to = &mut dest[y * stride..y * stride + row];
-        to.copy_from_slice(from);
+        let from = offset + y * pitch;
+        let to = y * stride;
+        dest[to..to + row].copy_from_slice(&bgra[from..from + row]);
     }
 }
 

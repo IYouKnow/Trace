@@ -233,6 +233,12 @@ impl Default for ReplayConfig {
 enum ResolvedTarget {
     Monitor(Monitor),
     Window(Window),
+    /// A display, cropped to a window's on-screen area: the fallback for apps
+    /// whose pixels a window capture cannot read while they are in the background.
+    Area {
+        monitor: Monitor,
+        crop: capture::CropTarget,
+    },
 }
 
 /// Resolves the configured target, choosing a live capture item.
@@ -248,7 +254,7 @@ fn resolve_target(target: &CaptureTarget) -> Result<(ResolvedTarget, Option<Stri
         }
         CaptureTarget::Window { process, title } => {
             match crate::window::resolve(process.as_deref(), title.as_deref()) {
-                Ok(window) => Ok((ResolvedTarget::Window(window), None)),
+                Ok(window) => Ok((resolve_window(window), None)),
                 Err(error) => {
                     let monitor = crate::monitor::resolve(None)?;
                     Ok((
@@ -261,6 +267,29 @@ fn resolve_target(target: &CaptureTarget) -> Result<(ResolvedTarget, Option<Stri
             }
         }
     }
+}
+
+/// Decides how to capture `window`.
+///
+/// Apps that composite on the GPU (Chromium and everything Electron is built on)
+/// do not expose pixels to a window capture while they are in the background, so
+/// they are taken from the display they sit on and cropped to their area instead.
+fn resolve_window(window: Window) -> ResolvedTarget {
+    if crate::window::is_composited_app(&window) {
+        if let (Some(monitor), Some((monitor_x, monitor_y))) =
+            (window.monitor(), crate::window::monitor_origin(&window))
+        {
+            return ResolvedTarget::Area {
+                monitor,
+                crop: capture::CropTarget {
+                    window: window.as_raw_hwnd() as usize,
+                    monitor_x,
+                    monitor_y,
+                },
+            };
+        }
+    }
+    ResolvedTarget::Window(window)
 }
 
 /// Commands accepted by the encoder worker.
@@ -412,6 +441,15 @@ impl ReplaySession {
             )?,
             ResolvedTarget::Window(window) => capture::start_window_capture(
                 window,
+                frame_tx,
+                stop.clone(),
+                capture_config,
+                stats.clone(),
+                origin,
+            )?,
+            ResolvedTarget::Area { monitor, crop } => capture::start_area_capture(
+                monitor,
+                crop,
                 frame_tx,
                 stop.clone(),
                 capture_config,
@@ -588,10 +626,12 @@ fn run(
                         CapturedData::Nv12(nv12) => {
                             encoder.encode_av_frame(nv12.into_raw(), frame.timestamp_micros)?
                         }
-                        CapturedData::Bgra { data, pitch, width, height } => {
+                        CapturedData::Bgra { data, pitch, x, y, width, height } => {
                             encoder.encode_bgra(
                                 &data,
                                 pitch,
+                                x,
+                                y,
                                 width,
                                 height,
                                 frame.timestamp_micros,
