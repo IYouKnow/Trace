@@ -13,6 +13,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Result};
 use crossbeam_channel::{bounded, select, Receiver, Sender};
 use ffmpeg_next as ffmpeg;
+use windows_capture::monitor::Monitor;
+use windows_capture::window::Window;
 
 use crate::audio::{self, AudioCaptureHandle, AudioTrack, PcmChunk};
 use crate::audio_encode::AudioEncoder;
@@ -39,6 +41,9 @@ pub struct SessionStats {
     audio: Mutex<Option<String>>,
     /// Set when a requested endpoint was unavailable and a default is used.
     audio_warning: Mutex<Option<String>>,
+    /// Set when the requested capture target was unavailable and a fallback is
+    /// used, or when the captured window closes mid-session.
+    capture_warning: Mutex<Option<String>>,
     audio_packets: AtomicU64,
 }
 
@@ -84,6 +89,12 @@ impl SessionStats {
         self.audio_warning.lock().ok().and_then(|value| value.clone())
     }
 
+    /// A warning about the capture target, if any (e.g. the chosen window closed,
+    /// or the app was not running and a display was captured instead).
+    pub fn capture_warning(&self) -> Option<String> {
+        self.capture_warning.lock().ok().and_then(|value| value.clone())
+    }
+
     /// Encoded audio packets currently held for a future clip.
     pub fn audio_packets(&self) -> u64 {
         self.audio_packets.load(Ordering::Relaxed)
@@ -115,6 +126,14 @@ impl SessionStats {
     fn set_audio_warning(&self, warning: Option<String>) {
         if let Ok(mut value) = self.audio_warning.lock() {
             *value = warning;
+        }
+    }
+
+    /// Records a warning about the capture target (set from the capture thread
+    /// when a window closes, or from `start` when a fallback was used).
+    pub fn set_capture_warning(&self, warning: String) {
+        if let Ok(mut value) = self.capture_warning.lock() {
+            *value = Some(warning);
         }
     }
 }
@@ -168,6 +187,20 @@ impl AudioConfig {
     }
 }
 
+/// What the session should capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureTarget {
+    /// A whole display by device name (e.g. `\\.\DISPLAY1`), or `None` for the
+    /// primary display.
+    Monitor(Option<String>),
+    /// A single window, matched by owning process image name and — preferably —
+    /// its title, so the selection survives across sessions.
+    Window {
+        process: Option<String>,
+        title: Option<String>,
+    },
+}
+
 /// How the replay buffer should be encoded.
 #[derive(Debug, Clone)]
 pub struct ReplayConfig {
@@ -179,8 +212,8 @@ pub struct ReplayConfig {
     pub buffer_seconds: f64,
     /// Which audio sources to capture alongside the video.
     pub audio: AudioConfig,
-    /// Monitor device name to capture, or `None` for the primary display.
-    pub monitor: Option<String>,
+    /// What to capture: a display or a single window.
+    pub target: CaptureTarget,
 }
 
 impl Default for ReplayConfig {
@@ -191,7 +224,41 @@ impl Default for ReplayConfig {
             bitrate: 20_000_000,
             buffer_seconds: 60.0,
             audio: AudioConfig::default(),
-            monitor: None,
+            target: CaptureTarget::Monitor(None),
+        }
+    }
+}
+
+/// A capture target resolved to a concrete item.
+enum ResolvedTarget {
+    Monitor(Monitor),
+    Window(Window),
+}
+
+/// Resolves the configured target, choosing a live capture item.
+///
+/// A window that is no longer open (the app exited between selection and start)
+/// falls back to the primary display and reports a warning, so recording keeps
+/// working rather than failing outright.
+fn resolve_target(target: &CaptureTarget) -> Result<(ResolvedTarget, Option<String>)> {
+    match target {
+        CaptureTarget::Monitor(id) => {
+            let monitor = crate::monitor::resolve(id.as_deref())?;
+            Ok((ResolvedTarget::Monitor(monitor), None))
+        }
+        CaptureTarget::Window { process, title } => {
+            match crate::window::resolve(process.as_deref(), title.as_deref()) {
+                Ok(window) => Ok((ResolvedTarget::Window(window), None)),
+                Err(error) => {
+                    let monitor = crate::monitor::resolve(None)?;
+                    Ok((
+                        ResolvedTarget::Monitor(monitor),
+                        Some(format!(
+                            "the selected app is not available ({error}) — recording the primary display instead"
+                        )),
+                    ))
+                }
+            }
         }
     }
 }
@@ -314,8 +381,8 @@ impl ReplaySession {
         let worker_stats = stats.clone();
         let fps = config.fps;
         let bitrate = config.bitrate;
-        // Resolve the target display before `config` moves into the worker.
-        let monitor = crate::monitor::resolve(config.monitor.as_deref())?;
+        // Resolve the capture target before `config` moves into the worker.
+        let (target, capture_warning) = resolve_target(&config.target)?;
         let worker = std::thread::Builder::new()
             .name("trace-encoder".into())
             .spawn(move || {
@@ -333,14 +400,28 @@ impl ReplaySession {
                 }
             })?;
 
-        let capture = capture::start_monitor_capture(
-            monitor,
-            frame_tx,
-            stop.clone(),
-            capture::CaptureConfig { fps, bitrate },
-            stats.clone(),
-            origin,
-        )?;
+        let capture_config = capture::CaptureConfig { fps, bitrate };
+        let capture = match target {
+            ResolvedTarget::Monitor(monitor) => capture::start_monitor_capture(
+                monitor,
+                frame_tx,
+                stop.clone(),
+                capture_config,
+                stats.clone(),
+                origin,
+            )?,
+            ResolvedTarget::Window(window) => capture::start_window_capture(
+                window,
+                frame_tx,
+                stop.clone(),
+                capture_config,
+                stats.clone(),
+                origin,
+            )?,
+        };
+        if let Some(warning) = capture_warning {
+            stats.set_capture_warning(warning);
+        }
 
         Ok(Self {
             commands: command_tx,
@@ -507,8 +588,14 @@ fn run(
                         CapturedData::Nv12(nv12) => {
                             encoder.encode_av_frame(nv12.into_raw(), frame.timestamp_micros)?
                         }
-                        CapturedData::Bgra { data, pitch } => {
-                            encoder.encode_bgra(&data, pitch, frame.timestamp_micros)?
+                        CapturedData::Bgra { data, pitch, width, height } => {
+                            encoder.encode_bgra(
+                                &data,
+                                pitch,
+                                width,
+                                height,
+                                frame.timestamp_micros,
+                            )?
                         }
                     };
 

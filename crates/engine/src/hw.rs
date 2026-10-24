@@ -15,9 +15,11 @@ use std::ptr;
 use anyhow::{anyhow, Result};
 use ffmpeg_next::ffi;
 use windows::core::Interface;
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_TEX2D_ARRAY_VPOV, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_VIDEO_COLOR, D3D11_VIDEO_COLOR_0, D3D11_VIDEO_COLOR_YCbCrA,
+    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
     D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
@@ -64,6 +66,29 @@ pub const FRAME_POOL_SIZE: u32 = 16;
 
 fn hr(code: i32) -> anyhow::Error {
     anyhow!("hardware call failed (0x{:08x})", code as u32)
+}
+
+/// Largest centered rectangle with the source's aspect ratio inside the canvas.
+///
+/// Dimensions are kept even so chroma planes stay aligned; the returned rectangle
+/// is what the video processor scales the source into, with the remainder padded.
+fn fit_rect(source_width: u32, source_height: u32, canvas_width: u32, canvas_height: u32) -> RECT {
+    let source_width = source_width.max(1) as f64;
+    let source_height = source_height.max(1) as f64;
+    let scale = (canvas_width as f64 / source_width).min(canvas_height as f64 / source_height);
+
+    let width = ((source_width * scale).round() as u32).clamp(2, canvas_width.max(2)) & !1;
+    let height = ((source_height * scale).round() as u32).clamp(2, canvas_height.max(2)) & !1;
+
+    let left = canvas_width.saturating_sub(width) / 2;
+    let top = canvas_height.saturating_sub(height) / 2;
+
+    RECT {
+        left: left as i32,
+        top: top as i32,
+        right: (left + width) as i32,
+        bottom: (top + height) as i32,
+    }
 }
 
 /// Lowers the calling thread's priority so capture/encoding never outrank the
@@ -409,27 +434,36 @@ impl Drop for HwFrame {
 }
 
 /// Converts a captured BGRA texture into one slice of the NV12 pool on the GPU.
+///
+/// Input and output sizes may differ: the source is scaled to fit the fixed
+/// output canvas, aspect ratio preserved, with the remainder filled black. This
+/// is what keeps a resized window from changing the encoder's frame size.
 pub struct VideoProcessor {
     device: ID3D11VideoDevice,
     context: ID3D11VideoContext,
     processor: ID3D11VideoProcessor,
     enumerator: ID3D11VideoProcessorEnumerator,
     output_views: Vec<ID3D11VideoProcessorOutputView>,
+    input_width: u32,
+    input_height: u32,
     width: u32,
     height: u32,
 }
 
 impl VideoProcessor {
-    /// Creates a processor converting `width`x`height` BGRA into the NV12 array
-    /// texture `texture` (which must have `slices` array elements).
+    /// Creates a processor converting an `input_width`x`input_height` BGRA frame
+    /// into the NV12 array texture `texture`, scaled to fit `width`x`height`.
     ///
     /// `fps` describes the content's frame rate. Input and output rates match, so
     /// the processor passes frames through unchanged; a truthful rate keeps the
     /// descriptor accurate on high-refresh displays.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         gpu: &GpuDevice,
         texture: &ID3D11Texture2D,
         slices: u32,
+        input_width: u32,
+        input_height: u32,
         width: u32,
         height: u32,
         fps: u32,
@@ -449,8 +483,8 @@ impl VideoProcessor {
                 Numerator: fps.max(1),
                 Denominator: 1,
             },
-            InputWidth: width,
-            InputHeight: height,
+            InputWidth: input_width.max(1),
+            InputHeight: input_height.max(1),
             OutputFrameRate: DXGI_RATIONAL {
                 Numerator: fps.max(1),
                 Denominator: 1,
@@ -523,15 +557,55 @@ impl VideoProcessor {
             output_views.push(single.ok_or_else(|| anyhow!("no output view returned"))?);
         }
 
-        Ok(Self {
+        let processor = Self {
             device,
             context,
             processor,
             enumerator,
             output_views,
+            input_width: input_width.max(1),
+            input_height: input_height.max(1),
             width,
             height,
-        })
+        };
+        processor.apply_scaling();
+        Ok(processor)
+    }
+
+    /// Places the (scaled) source inside the output canvas, filling the rest black.
+    ///
+    /// The destination rectangle is the largest centered rectangle with the
+    /// source's aspect ratio; the surrounding letterbox is the output background
+    /// color, so a window resize never distorts or crops the content.
+    fn apply_scaling(&self) {
+        let source = RECT {
+            left: 0,
+            top: 0,
+            right: self.input_width as i32,
+            bottom: self.input_height as i32,
+        };
+        let dest = fit_rect(self.input_width, self.input_height, self.width, self.height);
+        // Limited-range black: luma 16, neutral chroma, so padded regions decode
+        // as black rather than green.
+        let background = D3D11_VIDEO_COLOR {
+            Anonymous: D3D11_VIDEO_COLOR_0 {
+                YCbCr: D3D11_VIDEO_COLOR_YCbCrA {
+                    Y: 0.0625,
+                    Cb: 0.5,
+                    Cr: 0.5,
+                    A: 1.0,
+                },
+            },
+        };
+
+        unsafe {
+            self.context
+                .VideoProcessorSetStreamSourceRect(&self.processor, 0, true, Some(&source));
+            self.context
+                .VideoProcessorSetStreamDestRect(&self.processor, 0, true, Some(&dest));
+            self.context
+                .VideoProcessorSetOutputBackgroundColor(&self.processor, false, &background);
+        }
     }
 
     pub fn width(&self) -> u32 {

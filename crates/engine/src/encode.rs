@@ -154,12 +154,22 @@ pub struct VideoEncoder {
     name: String,
     kind: PipelineKind,
     encoder: ffmpeg::encoder::video::Encoder,
-    /// CPU colour converter, only for the BGRA fallback path.
-    scaler: Option<scaling::Context>,
-    /// Reused BGRA input frame for the fallback path.
-    scratch: Option<VideoFrame>,
-    /// Pixel format the scaler produces on the fallback path.
+    /// BGRA canvas → encoder pixel format, when the encoder needs conversion.
+    out_scaler: Option<scaling::Context>,
+    /// BGRA source → BGRA fitted-canvas scaler, rebuilt when the source resizes.
+    fit_scaler: Option<scaling::Context>,
+    /// Fitted size the `fit_scaler` was built for (source size, fitted size).
+    fit_input: Option<(u32, u32)>,
+    /// Whether this encoder is fed CPU BGRA frames at all.
+    cpu_input: bool,
+    /// Pixel format the encoder consumes.
     out_format: Pixel,
+    /// Reused BGRA frame holding the captured source rows.
+    source_frame: Option<VideoFrame>,
+    /// Reused BGRA frame at the fitted size, between the two scalers.
+    fitted_frame: Option<VideoFrame>,
+    /// Reused BGRA frame at the canvas size, the letterbox destination.
+    canvas_frame: Option<VideoFrame>,
     width: u32,
     height: u32,
     /// Microseconds between frames, used to advance timestamps.
@@ -252,7 +262,7 @@ impl VideoEncoder {
         Err(last_error.unwrap_or_else(|| anyhow!("no usable H.264 encoder available")))
     }
 
-    /// Builds the scaler and input frame once the encoder is open.
+    /// Builds the colour-conversion stage once the encoder is open.
     fn finish(
         encoder: ffmpeg::encoder::video::Encoder,
         width: u32,
@@ -262,39 +272,40 @@ impl VideoEncoder {
         kind: PipelineKind,
         hw: Option<Arc<HwFrames>>,
     ) -> Result<Self> {
-        let (scaler, scratch, out_format) = if kind == PipelineKind::CpuFallback {
-            let format = encoder.format();
-            let scratch = Some(VideoFrame::new(Pixel::BGRA, width, height));
-            if format == Pixel::BGRA || format == Pixel::RGBA {
-                // This encoder (e.g. AMF) takes BGRA directly, so the CPU
-                // fallback can skip swscale altogether.
-                (None, scratch, format)
-            } else {
-                let scaler = scaling::Context::get(
-                    Pixel::BGRA,
-                    width,
-                    height,
-                    format,
-                    width,
-                    height,
-                    scaling::Flags::BILINEAR,
-                )?;
-                (Some(scaler), scratch, format)
-            }
+        let cpu_input = kind == PipelineKind::CpuFallback;
+        let format = encoder.format();
+
+        // The fallback path always composites in BGRA and converts once at the
+        // end; an encoder that takes BGRA natively (e.g. AMF) skips that step.
+        let out_scaler = if cpu_input && format != Pixel::BGRA && format != Pixel::RGBA {
+            Some(scaling::Context::get(
+                Pixel::BGRA,
+                width,
+                height,
+                format,
+                width,
+                height,
+                scaling::Flags::BILINEAR,
+            )?)
         } else {
-            (None, None, encoder.format())
+            if cpu_input {
+                eprintln!("{name} accepts BGRA directly: skipping CPU colour conversion");
+            }
+            None
         };
 
-        if kind == PipelineKind::CpuFallback && scaler.is_none() {
-            eprintln!("{name} accepts BGRA directly: skipping CPU colour conversion");
-        }
         Ok(Self {
             name: name.to_string(),
             kind,
             encoder,
-            scaler,
-            scratch,
-            out_format,
+            out_scaler,
+            fit_scaler: None,
+            fit_input: None,
+            cpu_input,
+            out_format: format,
+            source_frame: None,
+            fitted_frame: None,
+            canvas_frame: None,
             width,
             height,
             interval_micros: 1_000_000 / fps.max(1) as i64,
@@ -332,10 +343,23 @@ impl VideoEncoder {
     }
 
     /// Encodes one BGRA frame at `pts` microseconds (CPU fallback path).
-    pub fn encode_bgra(&mut self, bgra: &[u8], pitch: usize, pts: i64) -> Result<Vec<Packet>> {
-        let row = (self.width * 4) as usize;
+    ///
+    /// The captured source may be a different size than the encoder's fixed canvas
+    /// — a window that was resized or maximised. It is scaled to fit the canvas and
+    /// letterboxed (or padded) with black, so the encoder only ever sees one size.
+    pub fn encode_bgra(
+        &mut self,
+        bgra: &[u8],
+        pitch: usize,
+        source_width: u32,
+        source_height: u32,
+        pts: i64,
+    ) -> Result<Vec<Packet>> {
+        anyhow::ensure!(self.cpu_input, "encoder does not accept CPU frames");
+
+        let row = source_width as usize * 4;
         anyhow::ensure!(pitch >= row, "row pitch {pitch} smaller than row {row}");
-        let needed = (self.height as usize - 1)
+        let needed = (source_height.max(1) as usize - 1)
             .checked_mul(pitch)
             .map(|offset| offset + row)
             .unwrap_or(0);
@@ -345,36 +369,80 @@ impl VideoEncoder {
             bgra.len()
         );
 
-        let scratch = self
-            .scratch
-            .as_mut()
-            .ok_or_else(|| anyhow!("encoder does not accept CPU frames"))?;
+        // Stage the captured rows into a BGRA frame of the source size.
+        let mut source = match self.source_frame.take() {
+            Some(frame) if frame.width() == source_width && frame.height() == source_height => frame,
+            _ => VideoFrame::new(Pixel::BGRA, source_width, source_height),
+        };
+        copy_rows(&mut source, bgra, pitch, row, source_height as usize);
 
-        let stride = scratch.stride(0);
-        if pitch == row && stride == row {
-            // No padding on either side: one copy is enough.
-            let len = row * self.height as usize;
-            scratch.data_mut(0)[..len].copy_from_slice(&bgra[..len]);
-        } else {
-            let dest = scratch.data_mut(0);
-            for y in 0..self.height as usize {
-                let src = &bgra[y * pitch..y * pitch + row];
-                dest[y * stride..y * stride + row].copy_from_slice(src);
-            }
+        if source_width == self.width && source_height == self.height {
+            // No resize: hand the source straight to the conversion stage.
+            let outcome = self.send_cpu_frame(&mut source, pts);
+            self.source_frame = Some(source);
+            return outcome;
         }
-        scratch.set_pts(Some(pts));
 
+        // Scale the source to fit the canvas, then place it centered on black.
+        let (fit_width, fit_height) = fit_dims(source_width, source_height, self.width, self.height);
+        if self.fit_input != Some((source_width, source_height))
+            || self.fit_scaler.is_none()
+        {
+            self.fit_scaler = Some(scaling::Context::get(
+                Pixel::BGRA,
+                source_width,
+                source_height,
+                Pixel::BGRA,
+                fit_width,
+                fit_height,
+                scaling::Flags::BILINEAR,
+            )?);
+            self.fit_input = Some((source_width, source_height));
+        }
+
+        let mut fitted = match self.fitted_frame.take() {
+            Some(frame) if frame.width() == fit_width && frame.height() == fit_height => frame,
+            _ => VideoFrame::new(Pixel::BGRA, fit_width, fit_height),
+        };
+        self.fit_scaler
+            .as_mut()
+            .expect("fit scaler just built")
+            .run(&source, &mut fitted)?;
+        self.fitted_frame = Some(fitted);
+
+        let mut canvas = match self.canvas_frame.take() {
+            Some(frame) if frame.width() == self.width && frame.height() == self.height => frame,
+            _ => VideoFrame::new(Pixel::BGRA, self.width, self.height),
+        };
+        fill_black(&mut canvas);
+        {
+            let fitted = self.fitted_frame.as_ref().expect("fitted frame just built");
+            let x = (self.width as usize - fit_width as usize) / 2;
+            let y = (self.height as usize - fit_height as usize) / 2;
+            blit_bgra(&mut canvas, fitted, x, y);
+        }
+
+        let outcome = self.send_cpu_frame(&mut canvas, pts);
+        self.source_frame = Some(source);
+        self.canvas_frame = Some(canvas);
+        outcome
+    }
+
+    /// Converts (if needed) and submits one canvas-sized BGRA frame.
+    fn send_cpu_frame(&mut self, frame: &mut VideoFrame, pts: i64) -> Result<Vec<Packet>> {
+        frame.set_pts(Some(pts));
         self.pending.push_back(pts);
-        match self.scaler.as_mut() {
+
+        match self.out_scaler.as_mut() {
             Some(scaler) => {
                 let mut converted = VideoFrame::new(self.out_format, self.width, self.height);
-                scaler.run(scratch, &mut converted)?;
+                scaler.run(frame, &mut converted)?;
                 converted.set_pts(Some(pts));
                 self.encoder.send_frame(&converted)?;
             }
             None => {
                 // Encoder takes BGRA natively; send the frame as-is.
-                self.encoder.send_frame(scratch)?;
+                self.encoder.send_frame(frame)?;
             }
         }
 
@@ -415,6 +483,67 @@ impl VideoEncoder {
     pub fn inner(&self) -> &ffmpeg::encoder::video::Encoder {
         &self.encoder
     }
+}
+
+/// Copies BGRA rows from a padded source buffer into a frame (padding preserved).
+fn copy_rows(frame: &mut VideoFrame, bgra: &[u8], pitch: usize, row: usize, height: usize) {
+    let stride = frame.stride(0);
+    if pitch == row && stride == row {
+        // No padding on either side: one copy is enough.
+        let len = row * height;
+        frame.data_mut(0)[..len].copy_from_slice(&bgra[..len]);
+        return;
+    }
+    let dest = frame.data_mut(0);
+    for y in 0..height {
+        let from = &bgra[y * pitch..y * pitch + row];
+        let to = &mut dest[y * stride..y * stride + row];
+        to.copy_from_slice(from);
+    }
+}
+
+/// Fills a packed BGRA frame with opaque black, so letterboxed edges are black.
+fn fill_black(frame: &mut VideoFrame) {
+    for pixel in frame.data_mut(0).chunks_exact_mut(4) {
+        pixel[0] = 0;
+        pixel[1] = 0;
+        pixel[2] = 0;
+        pixel[3] = 255;
+    }
+}
+
+/// Copies the packed BGRA `fitted` image into `canvas` with its top-left at `(x, y)`.
+fn blit_bgra(canvas: &mut VideoFrame, fitted: &VideoFrame, x: usize, y: usize) {
+    let row = fitted.width() as usize * 4;
+    let canvas_stride = canvas.stride(0);
+    let fitted_stride = fitted.stride(0);
+    let rows = fitted.height() as usize;
+    let source = fitted.data(0);
+    let dest = canvas.data_mut(0);
+
+    for r in 0..rows {
+        let to = (y + r) * canvas_stride + x;
+        let from = r * fitted_stride;
+        if to + row > dest.len() || from + row > source.len() {
+            break;
+        }
+        dest[to..to + row].copy_from_slice(&source[from..from + row]);
+    }
+}
+
+/// Largest centered even-sized rectangle with the source's aspect ratio.
+fn fit_dims(
+    source_width: u32,
+    source_height: u32,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> (u32, u32) {
+    let source_width = source_width.max(1) as f64;
+    let source_height = source_height.max(1) as f64;
+    let scale = (canvas_width as f64 / source_width).min(canvas_height as f64 / source_height);
+    let width = ((source_width * scale).round() as u32).clamp(2, canvas_width.max(2)) & !1;
+    let height = ((source_height * scale).round() as u32).clamp(2, canvas_height.max(2)) & !1;
+    (width, height)
 }
 
 fn open(

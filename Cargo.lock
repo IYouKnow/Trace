@@ -4677,6 +4677,7 @@ dependencies = [
  "anyhow",
  "crossbeam-channel",
  "ffmpeg-next",
+ "png 0.17.16",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

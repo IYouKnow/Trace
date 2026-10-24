@@ -73,6 +73,6 @@ fn main() -> anyhow::Result<()> {
 /// Attempts the texture + processor + output view for one candidate.
 fn build(gpu: &GpuDevice, bind_flags: u32, pool: u32) -> anyhow::Result<u32> {
     let (texture, slices) = hw::create_nv12_texture(gpu, WIDTH, HEIGHT, pool, bind_flags)?;
-    let _processor = VideoProcessor::new(gpu, &texture, slices, WIDTH, HEIGHT, FPS)?;
+    let _processor = VideoProcessor::new(gpu, &texture, slices, WIDTH, HEIGHT, WIDTH, HEIGHT, FPS)?;
     Ok(slices)
 }

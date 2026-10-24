@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use trace_engine::session::{AudioConfig, ReplayConfig, ReplaySession};
+use trace_engine::session::{AudioConfig, CaptureTarget, ReplayConfig, ReplaySession};
 
 fn main() -> anyhow::Result<()> {
     let dir = std::env::args()
@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
             system_device: std::env::var("SMOKE_SYSTEM_DEVICE").ok(),
             microphone_device: std::env::var("SMOKE_MIC_DEVICE").ok(),
         },
-        monitor: None,
+        target: CaptureTarget::Monitor(None),
     };
     println!("audio: {mode}");
 

@@ -16,6 +16,10 @@ export type Status = {
   fps: number;
   bitrate: number;
   monitor: string | null;
+  capture_source: CaptureSource;
+  window_title: string | null;
+  window_app: string | null;
+  capture_warning: string | null;
   clips_dir: string;
   available_encoders: string[];
 };
@@ -60,6 +64,31 @@ export type MonitorInfo = {
   is_primary: boolean;
 };
 
+/** Whether Trace records a whole display or a single window. */
+export type CaptureSource = "screen" | "window";
+
+/** A window the user can choose to record. */
+export type WindowInfo = {
+  id: string;
+  title: string;
+  /** Owning process image name, e.g. `chrome.exe`. */
+  app: string;
+  pid: number;
+  width: number;
+  height: number;
+  is_foreground: boolean;
+  /** PNG bytes for the app icon, or null when it could not be extracted. */
+  icon_png: number[] | null;
+};
+
+/** What to record; sent to the backend as a single target selection. */
+export type CaptureTarget = {
+  source: CaptureSource;
+  monitor: string | null;
+  windowProcess: string | null;
+  windowTitle: string | null;
+};
+
 export type Settings = {
   auto_start: boolean;
   launch_at_login: boolean;
@@ -71,6 +100,9 @@ export type Settings = {
   system_device: string | null;
   microphone_device: string | null;
   monitor: string | null;
+  capture_source: CaptureSource;
+  window_process: string | null;
+  window_title: string | null;
 };
 
 export type Hotkeys = {
@@ -94,7 +126,9 @@ export const api = {
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
   listAudioDevices: () => invoke<AudioDevices>("list_audio_devices"),
   listMonitors: () => invoke<MonitorInfo[]>("list_monitors"),
-  setMonitor: (monitor: string | null) => invoke<Status>("set_monitor", { monitor }),
+  listWindows: () => invoke<WindowInfo[]>("list_windows"),
+  setCaptureTarget: (target: CaptureTarget) =>
+    invoke<Status>("set_capture_target", target),
   startMicTest: (deviceId: string | null) =>
     invoke<MicTestStatus>("start_mic_test", { deviceId }),
   stopMicTest: () => invoke<void>("stop_mic_test"),

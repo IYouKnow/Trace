@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crossbeam_channel::unbounded;
 use trace_engine::audio::{self, AudioCaptureHandle, AudioTrack, DeviceInfo, PcmChunk};
 use trace_engine::encode;
-use trace_engine::session::{AudioConfig, ReplayConfig, ReplaySession, SessionStats};
+use trace_engine::session::{AudioConfig, CaptureTarget, ReplayConfig, ReplaySession, SessionStats};
 use trace_library::{self as library, ClipSummary};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
@@ -81,6 +81,20 @@ struct AudioDevices {
     microphone: Vec<DeviceInfo>,
 }
 
+/// Whether Trace records a whole display or a single window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CaptureSource {
+    Screen,
+    Window,
+}
+
+impl Default for CaptureSource {
+    fn default() -> Self {
+        CaptureSource::Screen
+    }
+}
+
 /// User-configurable options.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Settings {
@@ -108,6 +122,15 @@ struct Settings {
     /// Monitor device name to record, or `None` for the primary display.
     #[serde(default)]
     monitor: Option<String>,
+    /// Whether to record a whole display or a single window.
+    #[serde(default)]
+    capture_source: CaptureSource,
+    /// Process image name of the window to record (e.g. `chrome.exe`).
+    #[serde(default)]
+    window_process: Option<String>,
+    /// Title of the window when it was picked, used to find it again later.
+    #[serde(default)]
+    window_title: Option<String>,
 }
 
 /// Serde default for settings that ship enabled.
@@ -128,6 +151,9 @@ impl Default for Settings {
             system_device: None,
             microphone_device: None,
             monitor: None,
+            capture_source: CaptureSource::default(),
+            window_process: None,
+            window_title: None,
         }
     }
 }
@@ -155,6 +181,15 @@ struct Status {
     bitrate: u64,
     /// Monitor device name being recorded, or `None` for the primary display.
     monitor: Option<String>,
+    /// Whether a display or a window is being recorded.
+    capture_source: CaptureSource,
+    /// Title of the window being recorded, or `None` when recording a display.
+    window_title: Option<String>,
+    /// Owning process image name of the recorded window, if any.
+    window_app: Option<String>,
+    /// Set when the chosen target was unavailable and a fallback is in use, or
+    /// when the recorded window closed.
+    capture_warning: Option<String>,
     clips_dir: String,
     available_encoders: Vec<String>,
 }
@@ -272,6 +307,18 @@ impl AppState {
             fps: settings.fps,
             bitrate: settings.bitrate,
             monitor: settings.monitor.clone(),
+            capture_source: settings.capture_source,
+            window_title: if settings.capture_source == CaptureSource::Window {
+                settings.window_title.clone()
+            } else {
+                None
+            },
+            window_app: if settings.capture_source == CaptureSource::Window {
+                settings.window_process.clone()
+            } else {
+                None
+            },
+            capture_warning: stats.and_then(SessionStats::capture_warning),
             clips_dir: self.cached_clips_dir(app),
             available_encoders: self.cached_encoders(),
         }
@@ -304,6 +351,13 @@ fn start_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, Strin
                     }
                 }
             };
+            let target = match settings.capture_source {
+                CaptureSource::Screen => CaptureTarget::Monitor(settings.monitor.clone()),
+                CaptureSource::Window => CaptureTarget::Window {
+                    process: settings.window_process.clone(),
+                    title: settings.window_title.clone(),
+                },
+            };
             let config = ReplayConfig {
                 encoder: settings.encoder.clone(),
                 fps: settings.fps,
@@ -313,7 +367,7 @@ fn start_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, Strin
                     settings.system_device.clone(),
                     settings.microphone_device.clone(),
                 ),
-                monitor: settings.monitor.clone(),
+                target,
             };
 
             let started = ReplaySession::start(config, dir).map_err(|error| error.to_string())?;
@@ -494,18 +548,43 @@ async fn list_monitors() -> Vec<trace_engine::monitor::MonitorInfo> {
     trace_engine::monitor::list_monitors().unwrap_or_default()
 }
 
-/// Selects the monitor to record, restarting capture if it is already running.
+/// Lists the windows available to record, foreground first.
+///
+/// Icon extraction touches the shell and each owning process, so it runs off the
+/// async runtime's worker threads.
 #[tauri::command]
-fn set_monitor(
+async fn list_windows() -> Vec<trace_engine::window::WindowInfo> {
+    match tauri::async_runtime::spawn_blocking(trace_engine::window::list_windows).await {
+        Ok(Ok(windows)) => windows,
+        Ok(Err(error)) => {
+            eprintln!("failed to list windows: {error:#}");
+            Vec::new()
+        }
+        Err(error) => {
+            eprintln!("failed to list windows: {error}");
+            Vec::new()
+        }
+    }
+}
+
+/// Selects what to record (a display or a window), restarting capture if running.
+#[tauri::command]
+fn set_capture_target(
     app: AppHandle,
     state: State<'_, AppState>,
+    source: CaptureSource,
     monitor: Option<String>,
+    window_process: Option<String>,
+    window_title: Option<String>,
 ) -> Result<Status, String> {
     let running = state.session.lock().map(|s| s.is_some()).unwrap_or(false);
 
     {
         let mut settings = state.settings.lock().map_err(|error| error.to_string())?;
+        settings.capture_source = source;
         settings.monitor = monitor;
+        settings.window_process = window_process;
+        settings.window_title = window_title;
         settings::persist(&app, &settings)?;
     }
 
@@ -890,7 +969,8 @@ pub fn run() {
             set_hotkeys_suspended,
             list_audio_devices,
             list_monitors,
-            set_monitor,
+            list_windows,
+            set_capture_target,
             start_mic_test,
             stop_mic_test,
             mic_test_status,

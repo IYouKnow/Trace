@@ -23,8 +23,9 @@ use windows_capture::graphics_capture_api::InternalCaptureControl;
 use windows_capture::monitor::Monitor;
 use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
-    MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+    GraphicsCaptureItemType, MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
+use windows_capture::window::Window;
 
 use crate::encode;
 use crate::hw::{self, GpuDevice, HwFrame, HwFrames, VideoProcessor};
@@ -89,7 +90,13 @@ pub enum CapturedData {
     /// Downloaded NV12 frame for a software encoder.
     Nv12(Nv12Frame),
     /// Raw BGRA pixels (fallback path), row padding preserved.
-    Bgra { data: Vec<u8>, pitch: usize },
+    Bgra {
+        data: Vec<u8>,
+        pitch: usize,
+        /// Size of the captured source, which is scaled to the canvas by the encoder.
+        width: u32,
+        height: u32,
+    },
 }
 
 /// A frame forwarded to the encoder thread.
@@ -126,10 +133,6 @@ impl CaptureHandle {
 }
 
 /// Starts capturing `monitor`, forwarding frames to `sink`.
-///
-/// Dirty-region reporting is requested so a static desktop costs nothing; the
-/// OS-side update interval is only a hint, so real pacing happens in the
-/// handler. Both are optional and degrade gracefully on older Windows builds.
 pub fn start_monitor_capture(
     monitor: Monitor,
     sink: Sender<CaptureMessage>,
@@ -138,6 +141,37 @@ pub fn start_monitor_capture(
     stats: Arc<SessionStats>,
     origin: Instant,
 ) -> anyhow::Result<CaptureHandle> {
+    start_capture(monitor, sink, stop, config, stats, origin)
+}
+
+/// Starts capturing a single `window`, forwarding frames to `sink`.
+pub fn start_window_capture(
+    window: Window,
+    sink: Sender<CaptureMessage>,
+    stop: Arc<AtomicBool>,
+    config: CaptureConfig,
+    stats: Arc<SessionStats>,
+    origin: Instant,
+) -> anyhow::Result<CaptureHandle> {
+    start_capture(window, sink, stop, config, stats, origin)
+}
+
+/// Starts a capture on `item` (a monitor or a window).
+///
+/// Dirty-region reporting is requested so a static screen costs nothing; the
+/// OS-side update interval is only a hint, so real pacing happens in the
+/// handler. Both are optional and degrade gracefully on older Windows builds.
+fn start_capture<T>(
+    item: T,
+    sink: Sender<CaptureMessage>,
+    stop: Arc<AtomicBool>,
+    config: CaptureConfig,
+    stats: Arc<SessionStats>,
+    origin: Instant,
+) -> anyhow::Result<CaptureHandle>
+where
+    T: TryInto<GraphicsCaptureItemType> + Copy + Send + 'static,
+{
     let interval = Duration::from_micros(1_000_000 / config.fps.max(1) as u64);
 
     // Prefer dirty regions + a tight interval; fall back to defaults when the
@@ -156,7 +190,7 @@ pub fn start_monitor_capture(
     let mut last_error = None;
     for (dirty, min_interval) in attempts {
         let settings = Settings::new(
-            monitor,
+            item,
             CursorCaptureSettings::WithCursor,
             DrawBorderSettings::WithoutBorder,
             SecondaryWindowSettings::Default,
@@ -199,8 +233,13 @@ struct Pipeline {
     gpu: Option<GpuDevice>,
     hw_frames: Option<Arc<HwFrames>>,
     processor: Option<VideoProcessor>,
+    /// Fixed capture canvas (`width`x`height`); every frame is scaled onto it.
     width: u32,
     height: u32,
+    /// Size the video processor is currently built for (the source frame size).
+    input_width: u32,
+    input_height: u32,
+    fps: u32,
 }
 
 impl GraphicsCaptureApiHandler for FrameForwarder {
@@ -286,7 +325,9 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
         // hardware frame pool being momentarily exhausted while the encoder still
         // holds frames the capture side has not recycled. A dropped frame is the
         // right response: returning the error here would halt capture for good.
-        let pipeline = self.pipeline.as_ref().unwrap();
+        let pipeline = self.pipeline.as_mut().unwrap();
+        let canvas_width = pipeline.width;
+        let canvas_height = pipeline.height;
         let data = match build_frame_data(
             pipeline,
             &self.device,
@@ -307,8 +348,8 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
         // frame (it returns to the pool) and count it.
         match self.sink.try_send(CaptureMessage::Frame(CapturedFrame {
             data,
-            width: pipeline.width,
-            height: pipeline.height,
+            width: canvas_width,
+            height: canvas_height,
             timestamp_micros,
         })) {
             Ok(()) => {}
@@ -322,6 +363,14 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
 
         Ok(())
     }
+
+    /// Fired when the capture item closes — for a window target, that is the app
+    /// exiting, which the UI reports so the user knows why capture stopped.
+    fn on_closed(&mut self) -> Result<(), Self::Error> {
+        self.stats
+            .set_capture_warning("the captured window was closed".to_string());
+        Ok(())
+    }
 }
 
 /// Chooses and builds the strongest pipeline this machine supports.
@@ -331,15 +380,19 @@ fn build_pipeline(
     config: CaptureConfig,
     frame: &Frame<'_>,
 ) -> Result<Pipeline, BoxError> {
-    let width = frame.width();
-    let height = frame.height();
+    // The first frame fixes the canvas every later frame is scaled onto. NV12 and
+    // H.264 need even dimensions, and a resized window can be odd, so round down.
+    let width = even(frame.width());
+    let height = even(frame.height());
+    let input_width = frame.width();
+    let input_height = frame.height();
 
     // The GPU path is all-or-nothing and can be slow/flaky to probe; if it
     // failed once in this process, go straight to CPU so we neither stall nor
     // spam on every session.
     static GPU_DISABLED: AtomicBool = AtomicBool::new(false);
     if GPU_DISABLED.load(Ordering::Relaxed) {
-        return Ok(cpu_pipeline(width, height));
+        return Ok(cpu_pipeline(width, height, input_width, input_height, config.fps));
     }
 
     let gpu = GpuDevice::from_parts(device.clone(), context.clone());
@@ -355,7 +408,16 @@ fn build_pipeline(
 
     let mut last_error: Option<anyhow::Error> = None;
     for (bind_flags, pool) in candidates {
-        match build_gpu_pipeline(&gpu, width, height, config, bind_flags, pool) {
+        match build_gpu_pipeline(
+            &gpu,
+            width,
+            height,
+            input_width,
+            input_height,
+            config,
+            bind_flags,
+            pool,
+        ) {
             Ok(pipeline) => return Ok(pipeline),
             Err(error) => last_error = Some(error),
         }
@@ -365,15 +427,23 @@ fn build_pipeline(
     if let Some(error) = last_error {
         log_gpu_fallback(&error);
     }
-    Ok(cpu_pipeline(width, height))
+    Ok(cpu_pipeline(width, height, input_width, input_height, config.fps))
+}
+
+/// Rounds a dimension down to an even number (at least 2).
+fn even(value: u32) -> u32 {
+    value.max(2) & !1
 }
 
 /// Builds a GPU pipeline with the given texture bind flags and pool size, or
 /// fails so the caller can try another combination.
+#[allow(clippy::too_many_arguments)]
 fn build_gpu_pipeline(
     gpu: &GpuDevice,
     width: u32,
     height: u32,
+    input_width: u32,
+    input_height: u32,
     config: CaptureConfig,
     bind_flags: u32,
     pool: u32,
@@ -381,7 +451,16 @@ fn build_gpu_pipeline(
     // Create and validate the GPU conversion *before* building any FFmpeg
     // context, so a fallback never has to tear one down.
     let (texture, slices) = hw::create_nv12_texture(gpu, width, height, pool, bind_flags)?;
-    let processor = VideoProcessor::new(gpu, &texture, slices, width, height, config.fps)?;
+    let processor = VideoProcessor::new(
+        gpu,
+        &texture,
+        slices,
+        input_width,
+        input_height,
+        width,
+        height,
+        config.fps,
+    )?;
 
     let hw_frames = HwFrames::from_texture(
         gpu,
@@ -407,6 +486,9 @@ fn build_gpu_pipeline(
         processor: Some(processor),
         width,
         height,
+        input_width,
+        input_height,
+        fps: config.fps,
     })
 }
 
@@ -423,7 +505,7 @@ fn log_gpu_fallback(error: &anyhow::Error) {
 }
 
 /// A pipeline for the pure-CPU fallback, which needs no GPU objects.
-fn cpu_pipeline(width: u32, height: u32) -> Pipeline {
+fn cpu_pipeline(width: u32, height: u32, input_width: u32, input_height: u32, fps: u32) -> Pipeline {
     Pipeline {
         path: CapturePath::CpuFallback,
         gpu: None,
@@ -431,6 +513,9 @@ fn cpu_pipeline(width: u32, height: u32) -> Pipeline {
         processor: None,
         width,
         height,
+        input_width,
+        input_height,
+        fps,
     }
 }
 
@@ -474,14 +559,25 @@ fn readback_bgra(
 
 /// Converts one captured frame into the pixel payload the encoder consumes,
 /// following the pipeline chosen at startup.
+///
+/// When the source has been resized (a window was resized or maximised) the GPU
+/// processor is rebuilt for the new input size while the NV12 canvas — and so the
+/// encoder's frame pool — stays put.
 fn build_frame_data(
-    pipeline: &Pipeline,
+    pipeline: &mut Pipeline,
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     readback: &mut Option<StagingTexture>,
     frame: &Frame<'_>,
     timestamp_micros: i64,
 ) -> Result<CapturedData, BoxError> {
+    if pipeline.path != CapturePath::CpuFallback {
+        pipeline.sync_source_size(frame)?;
+    }
+
+    let source_width = frame.width();
+    let source_height = frame.height();
+
     Ok(match pipeline.path {
         CapturePath::ZeroCopy => {
             let hw_frames = pipeline.hw_frames.as_ref().unwrap();
@@ -512,9 +608,46 @@ fn build_frame_data(
         }
         CapturePath::CpuFallback => {
             let (data, pitch) = readback_bgra(device, context, readback, frame)?;
-            CapturedData::Bgra { data, pitch }
+            CapturedData::Bgra {
+                data,
+                pitch,
+                width: source_width,
+                height: source_height,
+            }
         }
     })
+}
+
+impl Pipeline {
+    /// Rebuilds the video processor when the source size changes.
+    ///
+    /// The NV12 output texture (and the `HwFrames` pool built on it) is fixed for
+    /// the session, so only the conversion stage is recreated — the encoder never
+    /// sees a size change.
+    fn sync_source_size(&mut self, frame: &Frame<'_>) -> Result<(), BoxError> {
+        let width = frame.width();
+        let height = frame.height();
+        if width == self.input_width && height == self.input_height {
+            return Ok(());
+        }
+
+        if let (Some(gpu), Some(hw_frames)) = (self.gpu.as_ref(), self.hw_frames.as_ref()) {
+            self.processor = Some(VideoProcessor::new(
+                gpu,
+                hw_frames.texture(),
+                hw_frames.pool(),
+                width,
+                height,
+                self.width,
+                self.height,
+                self.fps,
+            )?);
+        }
+
+        self.input_width = width;
+        self.input_height = height;
+        Ok(())
+    }
 }
 
 /// Reports the first frame-drop reason once, so a transient failure (such as the

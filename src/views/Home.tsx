@@ -1,11 +1,29 @@
 import { listen } from "@tauri-apps/api/event";
-import { Film, LoaderCircle, Play, Save, Square, Trash2 } from "lucide-react";
+import {
+  AppWindow,
+  Film,
+  LoaderCircle,
+  Play,
+  Save,
+  Square,
+  Trash2,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { AppIcon, AppPickerDialog } from "../components/AppPickerDialog";
 import { ClipThumbnail } from "../components/ClipThumbnail";
 import { MonitorCard } from "../components/MonitorCard";
 import { WindowControls } from "../components/WindowControls";
 import { Banner } from "../components/ui/Banner";
-import { api, assetUrl, type Clip, type MonitorInfo, type Status } from "../lib/api";
+import {
+  api,
+  assetUrl,
+  type CaptureSource,
+  type CaptureTarget,
+  type Clip,
+  type MonitorInfo,
+  type Status,
+  type WindowInfo,
+} from "../lib/api";
 import { cx } from "../lib/cx";
 
 /// Encoders that typically run on the CPU rather than a GPU block.
@@ -25,12 +43,29 @@ export default function Home({ status, pollError, onChanged }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [clips, setClips] = useState<Clip[]>([]);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
-  const [monitorBusy, setMonitorBusy] = useState(false);
+  const [targetBusy, setTargetBusy] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickedApp, setPickedApp] = useState<WindowInfo | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   const replaying = status?.replaying ?? false;
   const replayStartedMs = status?.replay_started_ms ?? null;
   const bufferSeconds = status?.buffer_seconds ?? 0;
+  const source: CaptureSource = status?.capture_source ?? "screen";
+
+  // What the backend is recording, so a change can patch just one part and keep
+  // the rest (the display choice survives while an app is selected).
+  const currentTarget: CaptureTarget = {
+    source,
+    monitor: status?.monitor ?? null,
+    windowProcess: status?.window_app ?? null,
+    windowTitle: status?.window_title ?? null,
+  };
+
+  // The recorded app: the freshly picked one, or whatever the backend reports.
+  const appName = pickedApp?.app ?? status?.window_app ?? null;
+  const appTitle = pickedApp?.title ?? status?.window_title ?? null;
+  const appIcon = pickedApp?.icon_png ?? null;
 
   // Tick while recording so the elapsed timer advances between status polls.
   useEffect(() => {
@@ -126,20 +161,47 @@ export default function Home({ status, pollError, onChanged }: Props) {
     }
   }
 
-  /// Switches the recorded display. While replaying this restarts capture on
-  /// the new monitor, so it can take a moment.
-  async function selectMonitor(id: string) {
-    if (id === status?.monitor) return;
-    setMonitorBusy(true);
+  /// Applies a capture-target change, restarting capture when one is running.
+  async function applyTarget(patch: Partial<CaptureTarget>) {
+    setTargetBusy(true);
     setError(null);
     try {
-      await api.setMonitor(id);
+      await api.setCaptureTarget({ ...currentTarget, ...patch });
       onChanged();
     } catch (caught) {
       setError(String(caught));
     } finally {
-      setMonitorBusy(false);
+      setTargetBusy(false);
     }
+  }
+
+  /// Switches the recorded display. While replaying this restarts capture on
+  /// the new monitor, so it can take a moment.
+  async function selectMonitor(id: string) {
+    if (source === "screen" && id === status?.monitor) return;
+    await applyTarget({ source: "screen", monitor: id });
+  }
+
+  /// Flips between recording a whole screen and a single app. Picking "app"
+  /// opens the picker first, so the source only changes once a window is chosen.
+  function changeSource(next: CaptureSource) {
+    if (next === "window") {
+      setPickerOpen(true);
+      return;
+    }
+    if (next === source) return;
+    void applyTarget({ source: "screen" });
+  }
+
+  /// Records the window the user picked from the dialog.
+  async function pickApp(window: WindowInfo) {
+    setPickerOpen(false);
+    setPickedApp(window);
+    await applyTarget({
+      source: "window",
+      windowProcess: window.app,
+      windowTitle: window.title,
+    });
   }
 
   /// Moves a recent clip to the Recycle Bin; the backend then emits
@@ -177,26 +239,95 @@ export default function Home({ status, pollError, onChanged }: Props) {
 
         {status?.audio_warning && <Banner tone="warn">{status.audio_warning}</Banner>}
 
-        {monitors.length > 0 && (
+        {status?.capture_warning && (
+          <Banner tone="warn">{status.capture_warning}</Banner>
+        )}
+
+        <div className="flex justify-center">
           <div
-            className={cx(
-              "grid gap-3",
-              monitors.length > 1 ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1",
-            )}
+            role="group"
+            aria-label="Capture source"
+            className="inline-flex items-center gap-0.5 rounded-[var(--radius-control)] border border-line bg-surface p-0.5"
           >
-            {monitors.map((monitor) => (
-              <MonitorCard
-                key={monitor.id}
-                monitor={monitor}
-                selected={monitor.id === selectedId}
-                replaying={replaying}
-                bufferSeconds={bufferSeconds}
-                recordedSeconds={recordedSeconds}
-                busy={monitorBusy}
-                onSelect={() => selectMonitor(monitor.id)}
-              />
+            {(
+              [
+                ["screen", "Whole screen"],
+                ["window", "App"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                disabled={targetBusy}
+                aria-pressed={source === value}
+                onClick={() => changeSource(value)}
+                className={cx(
+                  "h-7 cursor-pointer rounded-[6px] px-3 text-[12px] font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-60",
+                  source === value
+                    ? "bg-accent text-accent-ink"
+                    : "text-ink-muted hover:bg-elevated hover:text-ink",
+                )}
+              >
+                {label}
+              </button>
             ))}
           </div>
+        </div>
+
+        {source === "screen" &&
+          monitors.length > 0 && (
+            <div
+              className={cx(
+                "grid gap-3",
+                monitors.length > 1 ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1",
+              )}
+            >
+              {monitors.map((monitor) => (
+                <MonitorCard
+                  key={monitor.id}
+                  monitor={monitor}
+                  selected={monitor.id === selectedId}
+                  replaying={replaying}
+                  bufferSeconds={bufferSeconds}
+                  recordedSeconds={recordedSeconds}
+                  busy={targetBusy}
+                  onSelect={() => selectMonitor(monitor.id)}
+                />
+              ))}
+            </div>
+          )}
+
+        {source === "window" && (
+          <button
+            type="button"
+            disabled={targetBusy}
+            onClick={() => setPickerOpen(true)}
+            className={cx(
+              "flex w-full cursor-pointer items-center gap-3 rounded-[var(--radius-panel)] border bg-surface px-4 py-3 text-left transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-60",
+              replaying && appTitle
+                ? "capture-glow border-rec/40"
+                : "border-line hover:border-line-strong",
+            )}
+          >
+            {appIcon && appName ? (
+              <AppIcon png={appIcon} app={appName} />
+            ) : (
+              <span className="grid size-8 shrink-0 place-items-center rounded-[6px] bg-elevated text-ink-faint">
+                <AppWindow className="size-4" />
+              </span>
+            )}
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[13px] font-medium text-ink">
+                {appTitle ?? "Choose an app"}
+              </span>
+              <span className="block truncate text-[12px] text-ink-faint">
+                {appName ?? "Record one window instead of the whole screen"}
+              </span>
+            </span>
+            <span className="shrink-0 rounded-[var(--radius-control)] border border-line px-2.5 py-1 text-[12px] text-ink-muted">
+              Change
+            </span>
+          </button>
         )}
 
         <div className="flex flex-col items-center gap-2.5">
@@ -290,6 +421,10 @@ export default function Home({ status, pollError, onChanged }: Props) {
           )}
         </section>
       </div>
+
+      {pickerOpen && (
+        <AppPickerDialog onClose={() => setPickerOpen(false)} onSelect={pickApp} />
+      )}
     </div>
   );
 }

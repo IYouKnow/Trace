@@ -60,7 +60,9 @@ fn main() -> anyhow::Result<()> {
     let processor = if env_flag("ZC_SKIP_PROCESSOR") {
         None
     } else {
-        Some(VideoProcessor::new(&gpu, &nv12, slices, WIDTH, HEIGHT, FPS)?)
+        Some(VideoProcessor::new(
+            &gpu, &nv12, slices, WIDTH, HEIGHT, WIDTH, HEIGHT, FPS,
+        )?)
     };
     println!("processor: {}", if processor.is_some() { "built" } else { "skipped" });
 
