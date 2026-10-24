@@ -175,6 +175,8 @@ export default function Home({ status, pollError, onChanged }: Props) {
           </Banner>
         )}
 
+        {status?.audio_warning && <Banner tone="warn">{status.audio_warning}</Banner>}
+
         {monitors.length > 0 && (
           <div
             className={cx(

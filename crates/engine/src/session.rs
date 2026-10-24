@@ -37,6 +37,8 @@ pub struct SessionStats {
     idle: AtomicU64,
     /// Which audio tracks are being captured, once known.
     audio: Mutex<Option<String>>,
+    /// Set when a requested endpoint was unavailable and a default is used.
+    audio_warning: Mutex<Option<String>>,
     audio_packets: AtomicU64,
 }
 
@@ -76,6 +78,12 @@ impl SessionStats {
         self.audio.lock().ok().and_then(|value| value.clone())
     }
 
+    /// A warning about the audio devices in use, if any (e.g. a requested
+    /// endpoint was unavailable and the default was captured instead).
+    pub fn audio_warning(&self) -> Option<String> {
+        self.audio_warning.lock().ok().and_then(|value| value.clone())
+    }
+
     /// Encoded audio packets currently held for a future clip.
     pub fn audio_packets(&self) -> u64 {
         self.audio_packets.load(Ordering::Relaxed)
@@ -101,6 +109,12 @@ impl SessionStats {
     fn set_audio(&self, label: &str) {
         if let Ok(mut value) = self.audio.lock() {
             *value = Some(label.to_string());
+        }
+    }
+
+    fn set_audio_warning(&self, warning: Option<String>) {
+        if let Ok(mut value) = self.audio_warning.lock() {
+            *value = warning;
         }
     }
 }
@@ -262,19 +276,39 @@ impl ReplaySession {
         // worker keeps the sender alive so `recv` blocks instead of disconnecting
         // when audio is off.
         let (audio_tx, audio_rx) = bounded::<(AudioTrack, PcmChunk)>(512);
-        if let Some(label) = audio_label(&config.audio) {
-            stats.set_audio(&label);
-        }
         let mut audio = Vec::new();
+        let mut labels = Vec::new();
+        let mut warning: Option<String> = None;
         for track in config.audio.tracks() {
-            let device = config.audio.device(track);
-            match audio::start_capture(track, audio_tx.clone(), origin, device) {
-                Ok(handle) => audio.push(handle),
+            match audio::start_capture(track, audio_tx.clone(), origin, config.audio.device(track))
+            {
+                Ok(handle) => {
+                    let device = handle.device();
+                    labels.push(format!("{}: {}", track.label(), device.name));
+                    if device.fell_back {
+                        eprintln!(
+                            "audio capture ({}): requested device unavailable, using {}",
+                            track.label(),
+                            device.name
+                        );
+                        let note =
+                            format!("{} device unavailable — using {}", track.label(), device.name);
+                        warning = Some(match warning {
+                            Some(existing) => format!("{existing}; {note}"),
+                            None => note,
+                        });
+                    }
+                    audio.push(handle);
+                }
                 Err(error) => {
                     eprintln!("audio capture ({}) unavailable: {error:#}", track.label());
                 }
             }
         }
+        if !labels.is_empty() {
+            stats.set_audio(&labels.join(" + "));
+        }
+        stats.set_audio_warning(warning);
 
         let worker_dir = clips_dir.clone();
         let worker_stats = stats.clone();
@@ -718,31 +752,6 @@ fn save(
         time_base,
     )?;
     Ok(path)
-}
-
-/// Human-readable description of the devices being captured, e.g.
-/// `system: Speakers (Realtek) + microphone: Headset Microphone`, or `None` when
-/// audio is off. Falls back to the requested id when a name can't be resolved.
-fn audio_label(config: &AudioConfig) -> Option<String> {
-    let tracks = config.tracks();
-    if tracks.is_empty() {
-        return None;
-    }
-    let mut parts = Vec::new();
-    for track in tracks {
-        let name = match config.device(track) {
-            Some(id) => audio::list_devices(track)
-                .ok()
-                .and_then(|devices| devices.into_iter().find(|device| device.id == id))
-                .map(|device| device.name)
-                .unwrap_or_else(|| id.to_string()),
-            None => audio::default_device_info(track)
-                .map(|device| device.name)
-                .unwrap_or_else(|_| "default".to_string()),
-        };
-        parts.push(format!("{}: {name}", track.label()));
-    }
-    Some(parts.join(" + "))
 }
 
 fn timestamp() -> u64 {

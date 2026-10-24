@@ -148,6 +148,8 @@ struct Status {
     idle: u64,
     /// Active audio devices (e.g. "system: Speakers + microphone: Headset Mic").
     audio: Option<String>,
+    /// Set when a requested audio device was unavailable and a default is used.
+    audio_warning: Option<String>,
     buffer_seconds: u32,
     fps: u32,
     bitrate: u64,
@@ -265,6 +267,7 @@ impl AppState {
             dropped: stats.map(SessionStats::dropped).unwrap_or(0),
             idle: stats.map(SessionStats::idle).unwrap_or(0),
             audio: stats.and_then(SessionStats::audio),
+            audio_warning: stats.and_then(SessionStats::audio_warning),
             buffer_seconds: settings.buffer_seconds,
             fps: settings.fps,
             bitrate: settings.bitrate,
@@ -450,8 +453,28 @@ fn set_settings(
 ) -> Result<(), String> {
     settings::persist(&app, &settings)?;
     apply_autostart(&app, settings.launch_at_login);
-    if let Ok(mut current) = state.settings.lock() {
+
+    let audio_changed = {
+        let mut current = state.settings.lock().map_err(|error| error.to_string())?;
+        let changed = current.audio_source != settings.audio_source
+            || current.system_device != settings.system_device
+            || current.microphone_device != settings.microphone_device;
         *current = settings;
+        changed
+    };
+
+    // Capture reads its audio config once, when it starts, so a running session
+    // must be restarted for a source/device change to actually take effect.
+    if audio_changed {
+        let running = state
+            .session
+            .lock()
+            .map(|session| session.is_some())
+            .unwrap_or(false);
+        if running {
+            stop_replay_inner(&app, &state)?;
+            start_replay_inner(&app, &state)?;
+        }
     }
     Ok(())
 }
@@ -491,20 +514,6 @@ fn set_monitor(
         start_replay_inner(&app, &state)
     } else {
         Ok(state.status(&app))
-    }
-}
-
-/// Friendly name of the microphone the test will open; falls back to the id.
-fn mic_test_device_name(device_id: Option<&str>) -> String {
-    match device_id {
-        Some(id) => audio::list_devices(AudioTrack::Microphone)
-            .ok()
-            .and_then(|devices| devices.into_iter().find(|device| device.id == id))
-            .map(|device| device.name)
-            .unwrap_or_else(|| id.to_string()),
-        None => audio::default_device_info(AudioTrack::Microphone)
-            .map(|device| device.name)
-            .unwrap_or_else(|_| "System default".to_string()),
     }
 }
 
@@ -554,7 +563,13 @@ fn start_mic_test(
             .map_err(|error| error.to_string())?
     };
 
-    let device = mic_test_device_name(device_id.as_deref());
+    // Report the endpoint the test actually opened, not the requested one.
+    let opened = handle.device();
+    let device = if opened.fell_back {
+        format!("{} (requested device unavailable)", opened.name)
+    } else {
+        opened.name.clone()
+    };
     if let Ok(mut current) = state.mic_test.lock() {
         *current = Some(MicTest {
             handle,

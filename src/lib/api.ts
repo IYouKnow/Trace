@@ -11,6 +11,7 @@ export type Status = {
   dropped: number;
   idle: number;
   audio: string | null;
+  audio_warning: string | null;
   buffer_seconds: number;
   fps: number;
   bitrate: number;

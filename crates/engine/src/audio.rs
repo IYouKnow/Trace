@@ -98,13 +98,31 @@ impl PcmChunk {
     }
 }
 
+/// The endpoint a capture actually opened.
+#[derive(Debug, Clone)]
+pub struct ResolvedDevice {
+    /// WASAPI endpoint id that is opened.
+    pub id: String,
+    /// Friendly name of that endpoint.
+    pub name: String,
+    /// True when a requested id could not be found and the default was used.
+    pub fell_back: bool,
+}
+
 /// Handle to a running capture thread.
 pub struct AudioCaptureHandle {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// The endpoint this capture opened, for accurate status reporting.
+    device: ResolvedDevice,
 }
 
 impl AudioCaptureHandle {
+    /// The endpoint this capture actually opened.
+    pub fn device(&self) -> &ResolvedDevice {
+        &self.device
+    }
+
     /// Stops capturing and waits for the thread to finish.
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -174,6 +192,30 @@ pub fn list_devices(track: AudioTrack) -> Result<Vec<DeviceInfo>> {
     Ok(devices)
 }
 
+/// Resolves the endpoint that a capture will actually open. Lets callers report
+/// the real device, and detect when a requested one was unavailable.
+pub fn resolve_device(track: AudioTrack, device_id: Option<&str>) -> Result<ResolvedDevice> {
+    wasapi::initialize_mta().ok()?;
+    let enumerator = DeviceEnumerator::new()?;
+    let (device, fell_back) = match device_id {
+        // Prefer the requested endpoint, but fall back to the default if it is gone.
+        Some(id) => match enumerator.get_device(id) {
+            Ok(device) => (device, false),
+            Err(_) => (enumerator.get_default_device(&track.endpoint())?, true),
+        },
+        None => (enumerator.get_default_device(&track.endpoint())?, false),
+    };
+    let id = device.get_id().map_err(|error| anyhow!("{error}"))?;
+    let name = device
+        .get_friendlyname()
+        .unwrap_or_else(|_| "(unknown device)".to_string());
+    Ok(ResolvedDevice {
+        id,
+        name,
+        fell_back,
+    })
+}
+
 /// Starts capturing `track`, forwarding PCM chunks to `sink`.
 ///
 /// `origin` is the shared session clock; chunk timestamps are expressed as
@@ -186,14 +228,18 @@ pub fn start_capture(
     origin: Instant,
     device_id: Option<&str>,
 ) -> Result<AudioCaptureHandle> {
+    // Resolve up front so the caller can report the endpoint actually opened
+    // (and whether a requested one was unavailable).
+    let resolved = resolve_device(track, device_id)?;
+
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = stop.clone();
-    let device_id = device_id.map(str::to_string);
+    let open_id = Some(resolved.id.clone());
 
     let thread = std::thread::Builder::new()
         .name(format!("trace-audio-{}", track.label()))
         .spawn(move || {
-            if let Err(error) = capture_loop(track, sink, thread_stop, origin, device_id) {
+            if let Err(error) = capture_loop(track, sink, thread_stop, origin, open_id) {
                 eprintln!("audio capture ({}): {error:#}", track.label());
             }
         })?;
@@ -201,6 +247,7 @@ pub fn start_capture(
     Ok(AudioCaptureHandle {
         stop,
         thread: Some(thread),
+        device: resolved,
     })
 }
 

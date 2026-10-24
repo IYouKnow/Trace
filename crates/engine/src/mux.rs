@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use ffmpeg_next as ffmpeg;
 use ffmpeg::codec::packet::{Mut, Ref};
 use ffmpeg::Packet;
@@ -34,12 +34,13 @@ fn earliest_ts(packet: &Packet) -> Option<i64> {
 /// resets it, so a buffered packet (the replay ring's) must never be written
 /// directly. Duplicating leaves the original intact for the next clip, and
 /// sharing the buffer avoids copying the compressed bytes.
-fn duplicate(packet: &Packet) -> Packet {
+fn duplicate(packet: &Packet) -> Result<Packet> {
     let mut copy = Packet::empty();
-    unsafe {
-        ffmpeg::ffi::av_packet_ref(copy.as_mut_ptr(), packet.as_ptr());
+    let ret = unsafe { ffmpeg::ffi::av_packet_ref(copy.as_mut_ptr(), packet.as_ptr()) };
+    if ret < 0 {
+        bail!("failed to duplicate packet: av_packet_ref returned {ret}");
     }
-    copy
+    Ok(copy)
 }
 
 /// Writes the video packets plus one or more audio tracks into a new MP4 at
@@ -58,11 +59,19 @@ pub fn write_mp4(
 
     // Work on private duplicates: `av_interleaved_write_frame` consumes each
     // packet it is handed, and these packets live on in the replay ring.
-    let mut video_packets: Vec<Packet> = video_packets.iter().map(duplicate).collect();
+    let mut video_packets: Vec<Packet> = video_packets
+        .iter()
+        .map(duplicate)
+        .collect::<Result<Vec<_>>>()?;
     let mut audios: Vec<(&ffmpeg::encoder::audio::Encoder, Vec<Packet>)> = audios
         .iter()
-        .map(|(encoder, packets)| (*encoder, packets.iter().map(duplicate).collect()))
-        .collect();
+        .map(|(encoder, packets)| {
+            Ok((
+                *encoder,
+                packets.iter().map(duplicate).collect::<Result<Vec<_>>>()?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     // The stream borrow must end before `write_header`, which sets the muxer's
     // own time base.
