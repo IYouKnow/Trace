@@ -39,6 +39,36 @@ export type Release = {
 /// app will announce it once, then keep it on the Updates settings page.
 export const RELEASES: Release[] = [
   {
+    version: "0.6.0",
+    title: "Record a single app",
+    highlights: [
+      {
+        icon: AppWindow,
+        title: "Record one app instead of everything",
+        description:
+          "Pick an app and Trace records just that window. The chooser lists everything you have open with its real icon, and the app you're using right now sits at the top so you can find it at a glance.",
+      },
+      {
+        icon: LayoutGrid,
+        title: "Whole screen or one app",
+        description:
+          "Home now has a switch for what you're capturing: choose Whole screen and pick a display, or choose App and pick a window. Change it whenever you like — Trace starts capturing the new target on its own.",
+      },
+      {
+        icon: MonitorCheck,
+        title: "Apps that hide in the background still record",
+        description:
+          "Apps like Discord, Chrome and Slack stop drawing when they aren't the window you're using, which used to come out black. Trace now takes those from the screen instead, so the clip shows what was really there. An app you minimise records as blank rather than freezing on an old frame.",
+      },
+      {
+        icon: Volume2,
+        title: "Know which audio device was used",
+        description:
+          "If the speaker or microphone you chose isn't available — an unplugged headset, a switched-off interface — Trace falls back to your default and tells you which device it used, instead of quietly recording the wrong one.",
+      },
+    ],
+  },
+  {
     version: "0.5.0",
     title: "Settings, rebuilt",
     highlights: [
