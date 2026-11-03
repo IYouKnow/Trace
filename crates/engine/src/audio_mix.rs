@@ -82,6 +82,12 @@ impl AudioMixer {
             }
             let source = source.as_mut().unwrap();
 
+            // A reconnect can land on an endpoint with a different mix format;
+            // rebuild the converter rather than mixing mismatched PCM.
+            if !source.converter.matches(chunk) {
+                source.converter = PcmConverter::new(chunk)?;
+            }
+
             if !source.aligned {
                 // Align both sources to a common start so the mix is not offset.
                 let index = microseconds_to_samples(chunk.timestamp_micros);

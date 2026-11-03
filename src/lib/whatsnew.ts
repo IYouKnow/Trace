@@ -39,6 +39,18 @@ export type Release = {
 /// app will announce it once, then keep it on the Updates settings page.
 export const RELEASES: Release[] = [
   {
+    version: "0.6.1",
+    title: "Sound that survives sleep",
+    highlights: [
+      {
+        icon: Volume2,
+        title: "Audio no longer goes silent after sleep",
+        description:
+          "Putting the PC to sleep and waking it could leave Trace recording video with no sound, until the app was restarted. Trace now reconnects to your audio device on its own the moment it comes back, so your next clip has sound without a restart.",
+      },
+    ],
+  },
+  {
     version: "0.6.0",
     title: "Record a single app",
     highlights: [

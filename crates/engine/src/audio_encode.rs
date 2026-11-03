@@ -31,6 +31,17 @@ pub struct PcmConverter {
     src_format: Sample,
     src_layout: ChannelLayout,
     src_rate: u32,
+    src_channels: u16,
+}
+
+/// Maps a device chunk's format to the ffmpeg sample type it represents.
+fn device_sample_format(chunk: &PcmChunk) -> Result<Sample> {
+    Ok(match (chunk.is_float, chunk.bits_per_sample) {
+        (true, 32) => Sample::F32(Type::Packed),
+        (false, 16) => Sample::I16(Type::Packed),
+        (false, 32) => Sample::I32(Type::Packed),
+        (is_float, bits) => bail!("unsupported audio format: float={is_float} bits={bits}"),
+    })
 }
 
 impl PcmConverter {
@@ -38,12 +49,7 @@ impl PcmConverter {
     pub fn new(first: &PcmChunk) -> Result<Self> {
         ffmpeg::init()?;
 
-        let src_format = match (first.is_float, first.bits_per_sample) {
-            (true, 32) => Sample::F32(Type::Packed),
-            (false, 16) => Sample::I16(Type::Packed),
-            (false, 32) => Sample::I32(Type::Packed),
-            (is_float, bits) => bail!("unsupported audio format: float={is_float} bits={bits}"),
-        };
+        let src_format = device_sample_format(first)?;
         let src_layout = ChannelLayout::default(first.channels as i32);
 
         let resampler = ffmpeg::software::resampling::Context::get(
@@ -61,7 +67,21 @@ impl PcmConverter {
             src_format,
             src_layout,
             src_rate: first.sample_rate.max(1),
+            src_channels: first.channels,
         })
+    }
+
+    /// True when `chunk` has the same device format this converter was built for.
+    ///
+    /// A reconnect can land on an endpoint with a different mix format (e.g. after
+    /// Windows switches the default output on resume), in which case the converter
+    /// must be rebuilt rather than fed mismatched PCM.
+    pub fn matches(&self, chunk: &PcmChunk) -> bool {
+        self.src_rate == chunk.sample_rate.max(1)
+            && self.src_channels == chunk.channels
+            && device_sample_format(chunk)
+                .map(|format| format == self.src_format)
+                .unwrap_or(false)
     }
 
     /// Converts one device chunk, appending planar f32 samples to `out` (one
@@ -163,6 +183,12 @@ impl AudioEncoder {
         if !self.started {
             self.base_pts = chunk.timestamp_micros;
             self.started = true;
+        }
+
+        // A reconnect can land on an endpoint with a different mix format; rebuild
+        // the converter rather than resampling mismatched PCM.
+        if !self.converter.matches(chunk) {
+            self.converter = PcmConverter::new(chunk)?;
         }
 
         self.converter.convert(chunk, &mut self.buffers)?;

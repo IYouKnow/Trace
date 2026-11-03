@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
-use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{
+    AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
+};
 
 /// How often the capture loop polls the device.
 const POLL_INTERVAL: Duration = Duration::from_millis(3);
@@ -20,6 +22,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(3);
 /// Device buffer to request (100 ns units). A little slack so a late poll does
 /// not overflow the engine buffer and drop samples.
 const CAPTURE_BUFFER_HNS: i64 = 500_000; // 50 ms
+
+/// How long a stream may go without delivering a packet before it is probed for
+/// liveness (a WASAPI stream can go stale — e.g. across sleep — without erroring).
+const STALL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Backoff bounds for reopening a stream whose device has gone away.
+const RECONNECT_BACKOFF_MIN: Duration = Duration::from_millis(200);
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(2);
 
 /// Which audio source to capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,7 +244,11 @@ pub fn start_capture(
 
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = stop.clone();
-    let open_id = Some(resolved.id.clone());
+    // Pass the *requested* endpoint through, not the resolved one: when the user
+    // picked the system default (`None`), a reopen must re-resolve the current
+    // default so it follows a device switch (e.g. Windows picking a new output
+    // after resuming from sleep).
+    let open_id = device_id.map(str::to_string);
 
     let thread = std::thread::Builder::new()
         .name(format!("trace-audio-{}", track.label()))
@@ -270,24 +284,37 @@ pub fn default_device_info(track: AudioTrack) -> Result<DeviceInfo> {
     })
 }
 
-fn capture_loop(
-    track: AudioTrack,
-    sink: Sender<(AudioTrack, PcmChunk)>,
-    stop: Arc<AtomicBool>,
-    origin: Instant,
-    device_id: Option<String>,
-) -> Result<()> {
-    // COM must be initialised on this thread.
-    wasapi::initialize_mta().ok()?;
+/// An open capture stream: the WASAPI client plus the endpoint format it exposes.
+struct CaptureStream {
+    client: AudioClient,
+    capture: AudioCaptureClient,
+    sample_rate: u32,
+    channels: u16,
+    bits_per_sample: u16,
+    is_float: bool,
+}
 
+impl Drop for CaptureStream {
+    fn drop(&mut self) {
+        // Best-effort: the client may already be invalidated (device gone).
+        let _ = self.client.stop_stream();
+    }
+}
+
+/// Opens a capture stream for `track`.
+///
+/// `device_id` selects a specific endpoint; if it is `None` — or no longer
+/// present — the current default endpoint is used. Re-resolving the default on
+/// every open is what lets a reconnect follow a device change.
+fn open_stream(track: AudioTrack, device_id: Option<&str>) -> Result<CaptureStream> {
     let enumerator = DeviceEnumerator::new()?;
-    // Prefer the requested endpoint, but fall back to the default if it is gone.
-    let device = match device_id.as_deref() {
+    let device = match device_id {
         Some(id) => enumerator
             .get_device(id)
             .or_else(|_| enumerator.get_default_device(&track.endpoint()))?,
         None => enumerator.get_default_device(&track.endpoint())?,
     };
+
     let mut client = device.get_iaudioclient()?;
     let format: WaveFormat = client.get_mixformat()?;
 
@@ -309,54 +336,172 @@ fn capture_loop(
     )?;
 
     let capture = client.get_audiocaptureclient()?;
-    let mut queue: VecDeque<u8> = VecDeque::new();
-
     client.start_stream()?;
 
-    // Where this stream lands on the shared session clock. Chunks are then
-    // stamped as this offset plus the sample-accurate time they represent.
-    let origin_offset_micros = origin.elapsed().as_micros() as i64;
+    Ok(CaptureStream {
+        client,
+        capture,
+        sample_rate,
+        channels,
+        bits_per_sample,
+        is_float,
+    })
+}
 
+fn capture_loop(
+    track: AudioTrack,
+    sink: Sender<(AudioTrack, PcmChunk)>,
+    stop: Arc<AtomicBool>,
+    origin: Instant,
+    device_id: Option<String>,
+) -> Result<()> {
+    // COM must be initialised on this thread.
+    wasapi::initialize_mta().ok()?;
+
+    let mut queue: VecDeque<u8> = VecDeque::new();
+    // Anchored to the session origin on the first successful open and kept
+    // afterwards, so reconnecting does not shift the audio timeline.
+    let mut origin_offset_micros: Option<i64> = None;
     let mut frames_delivered: u64 = 0;
-    let mut closed = false;
+    let mut backoff = RECONNECT_BACKOFF_MIN;
+    // Latches the "device is down" log so a long outage reports once, not per try.
+    let mut reconnecting = false;
+
+    // The device can be torn down underneath us: Windows re-creates the audio
+    // engine on sleep/resume and invalidates every open stream, and endpoints can
+    // be unplugged or disabled at any time. Rather than letting one failure kill
+    // the thread (and silence the rest of the session), reopen and carry on.
+    while !stop.load(Ordering::Relaxed) {
+        let stream = match open_stream(track, device_id.as_deref()) {
+            Ok(stream) => stream,
+            Err(error) => {
+                if !reconnecting {
+                    eprintln!("audio capture ({}): reopening: {error:#}", track.label());
+                    reconnecting = true;
+                }
+                if !wait_before_retry(&stop, backoff) {
+                    break;
+                }
+                backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+                continue;
+            }
+        };
+
+        if reconnecting {
+            eprintln!("audio capture ({}): reconnected", track.label());
+            reconnecting = false;
+        }
+        backoff = RECONNECT_BACKOFF_MIN;
+        let origin_offset =
+            *origin_offset_micros.get_or_insert_with(|| origin.elapsed().as_micros() as i64);
+
+        // `pump` handles stop/closure itself and returns `true` when the stream
+        // needs reopening.
+        if !pump(
+            track,
+            &stream,
+            &sink,
+            &stop,
+            origin_offset,
+            &mut frames_delivered,
+            &mut queue,
+        ) {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Drains packets from `stream`, forwarding chunks to `sink`.
+///
+/// Returns `false` when the session is shutting down (stop requested, or the sink
+/// was dropped). Returns `true` on a stream failure or a stalled stream, so the
+/// caller reopens the endpoint.
+fn pump(
+    track: AudioTrack,
+    stream: &CaptureStream,
+    sink: &Sender<(AudioTrack, PcmChunk)>,
+    stop: &AtomicBool,
+    origin_offset: i64,
+    frames_delivered: &mut u64,
+    queue: &mut VecDeque<u8>,
+) -> bool {
+    let mut last_packet_at = Instant::now();
+    let bytes_per_frame = (stream.channels as u64 * (stream.bits_per_sample as u64 / 8)).max(1);
 
     while !stop.load(Ordering::Relaxed) {
         // A single read only drains one packet; read every packet the engine has
         // buffered, or the rest is overwritten and the audio comes out choppy.
         loop {
-            let available = capture.get_next_packet_size()?.unwrap_or(0);
+            let available = match stream.capture.get_next_packet_size() {
+                Ok(size) => size.unwrap_or(0),
+                Err(error) => {
+                    eprintln!("audio capture ({}): {error:#}; reopening", track.label());
+                    return true;
+                }
+            };
             if available == 0 {
                 break;
             }
-            capture.read_from_device_to_deque(&mut queue)?;
+            if let Err(error) = stream.capture.read_from_device_to_deque(queue) {
+                eprintln!("audio capture ({}): {error:#}; reopening", track.label());
+                return true;
+            }
+            last_packet_at = Instant::now();
         }
 
         if !queue.is_empty() {
             let data: Vec<u8> = queue.drain(..).collect();
-            let frames = data.len() as u64 / (channels as u64 * (bits_per_sample as u64 / 8)).max(1);
-            frames_delivered += frames;
+            let frames = data.len() as u64 / bytes_per_frame;
+            *frames_delivered += frames;
 
             let chunk = PcmChunk {
                 data,
-                sample_rate,
-                channels,
-                bits_per_sample,
-                is_float,
-                timestamp_micros: origin_offset_micros
-                    + frames_delivered as i64 * 1_000_000 / sample_rate.max(1) as i64,
+                sample_rate: stream.sample_rate,
+                channels: stream.channels,
+                bits_per_sample: stream.bits_per_sample,
+                is_float: stream.is_float,
+                timestamp_micros: origin_offset
+                    + *frames_delivered as i64 * 1_000_000 / stream.sample_rate.max(1) as i64,
             };
 
             // A closed channel means the session shut down.
             if sink.send((track, chunk)).is_err() {
-                closed = true;
-                break;
+                return false;
+            }
+        } else if last_packet_at.elapsed() >= STALL_TIMEOUT {
+            // No packets for a while. That is normal while the system is quiet, so
+            // probe the stream instead of blindly reopening: a live stream answers
+            // even when nothing is playing, a dead one errors.
+            match stream.client.get_current_padding() {
+                Ok(_) => last_packet_at = Instant::now(),
+                Err(error) => {
+                    eprintln!(
+                        "audio capture ({}): stream stalled ({error:#}); reopening",
+                        track.label()
+                    );
+                    return true;
+                }
             }
         }
 
         std::thread::sleep(POLL_INTERVAL);
     }
 
-    client.stop_stream()?;
-    let _ = closed;
-    Ok(())
+    false
+}
+
+/// Sleeps for `delay`, waking early if the session is stopping.
+///
+/// Returns `false` when stop was requested, so the caller can give up.
+fn wait_before_retry(stop: &AtomicBool, delay: Duration) -> bool {
+    let deadline = Instant::now() + delay;
+    while Instant::now() < deadline {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        std::thread::sleep(POLL_INTERVAL.min(Duration::from_millis(20)));
+    }
+    !stop.load(Ordering::Relaxed)
 }
